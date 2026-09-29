@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#753711" media="(prefers-color-scheme: dark)"><title>定时任务</title><link rel="stylesheet" href="style.css?v=1.0.0"><link rel="stylesheet" href="palette.css?v=1.0.0"></head>
+<body>
+<main class="shell">
+ <header class="topbar"><div><div class="eyebrow">XIAOMI SMART STORAGE</div><h1>定时任务</h1></div><button id="refresh" class="icon-button" aria-label="刷新">↻</button></header>
+ <section class="hero"><div><span id="health" class="badge">正在连接</span><h2>让 NAS 按计划工作</h2><p id="clock">正在读取设备时间…</p></div><div class="hero-icon" aria-hidden="true">◷</div></section>
+ <nav class="tabs" aria-label="功能页面"><button class="tab active" data-page="overview">概览</button><button class="tab" data-page="tasks">任务</button><button class="tab" data-page="templates">模板</button><button class="tab" data-page="history">记录</button></nav>
+ <section id="page-overview" class="page active">
+  <div class="metrics"><article><span>任务总数</span><strong id="countTotal">—</strong></article><article><span>已启用</span><strong id="countEnabled">—</strong></article><article><span>执行中</span><strong id="countRunning">—</strong></article><article><span>最近失败</span><strong id="countFailed">—</strong></article></div>
+  <article class="panel welcome"><div class="eyebrow accent">FIRST STEPS</div><h2>先选模板，再手动启用</h2><p>容器、用户脚本与安全清理模板默认停用。支持指定日期、月计划、Cron 和成功后联动。升级不会自动启用新任务或执行清理。</p><div class="actions"><button class="primary" data-go="tasks">配置我的任务</button><button class="secondary" data-go="templates">浏览模板</button></div></article>
+  <article class="panel"><h3>最近执行</h3><div id="recent" class="stack"></div></article>
+  <article class="panel"><h3>执行规则</h3><p>按 NAS 本机时区运行，每分钟检查一次。错过的普通计划不补跑；上次未结束则跳过。开机任务仅在启用后的下一次开机生效。</p><p id="poolInfo"></p><p>脚本以安装插件的用户执行；重启和 Docker 操作由受限权限助手执行。日志保留最近 100 条，每条最多 64 KiB。</p></article>
+ </section>
+ <section id="page-tasks" class="page"><div class="toolbar"><p id="taskSummary">正在读取…</p><button id="newTask" class="primary">＋ 新建任务</button></div><div id="taskList" class="stack"></div></section>
+ <section id="page-templates" class="page"><article class="notice">模板不会直接执行。点击“使用模板”后编辑并保存，任务仍是停用状态。</article><div id="templateList" class="stack"></div></section>
+ <section id="page-history" class="page"><div class="toolbar"><p>最近 100 条 · 点击查看输出</p><button id="refreshHistory" class="secondary">刷新</button></div><div id="historyList" class="stack"></div></section>
+ <footer id="version">插件版本 1.0.0</footer>
+</main>
+<div id="backdrop" class="backdrop" hidden></div>
+<section id="editor" class="dialog editor" role="dialog" aria-modal="true" aria-labelledby="editorTitle" hidden>
+ <header class="dialog-head"><div><div class="eyebrow accent">TASK EDITOR</div><h2 id="editorTitle">编辑任务</h2></div><button class="close-button" data-close="editor" aria-label="关闭">×</button></header>
+ <form id="taskForm"><div class="form-body">
+  <label>任务名称<input id="taskName" maxlength="80" required placeholder="例如：每天启动 Syncthing"></label>
+  <label>任务类型<select id="taskKind"><option value="docker_start">启动已有容器</option><option value="docker_stop">停止已有容器</option><option value="docker_restart">重启已有容器</option><option value="docker_image">从本地镜像创建/启动容器</option><option value="script">执行用户脚本</option><option value="reboot">重启整台 NAS</option><option value="cleanup">安全清理旧文件</option></select></label>
+  <div id="containerFields"><label>已有容器<select id="container"><option value="">请选择容器</option></select></label></div>
+  <div id="imageFields" hidden><label>本地镜像<select id="image"><option value="">请选择镜像</option></select></label><label>新容器名称<input id="containerName" placeholder="scheduled-demo"></label><p class="notice">此模板创建桥接网络容器，不映射端口、不挂载目录、不启用特权，也不自动拉取镜像。同名容器只允许复用本任务创建的容器。需要这些配置时，请先在 Docker 插件创建容器，再选择“启动已有容器”。</p></div>
+  <div id="scriptFields" hidden><label>脚本绝对路径<input id="scriptPath" placeholder="/home/你的用户/scripts/backup.sh"></label><p>使用 /bin/sh 以当前 NAS 用户执行，不授予 root；任务完成或超时后清理同进程组的子进程。</p></div>
+  <div id="rebootWarning" class="notice danger-note" hidden>会请求 1 分钟后重启整台 NAS，所有用户和服务都会受影响。请避开下载、备份与同步时段。</div>
+  <div id="cleanupFields" class="field-box" hidden>
+   <label>清理类型<select id="cleanupMode"><option value="logs">旧日志（*.log、*.log.[0-9]*、*.log.gz）</option><option value="temp">临时文件（*.tmp、*.temp）</option><option value="recycle">指定回收站内旧文件</option></select></label>
+   <label>明确的目标目录<input id="cleanupPath" placeholder="/nas/pool0/你的用户/data/某个目录"></label>
+   <div class="form-grid"><label>最后修改超过多少天<input id="cleanupDays" type="number" min="1" max="3650" value="30"></label><label>单次最多文件数<input id="cleanupMaxFiles" type="number" min="1" max="10000" value="1000"></label><label>单次最多容量（MiB）<input id="cleanupMaxMiB" type="number" min="1" max="10240" value="1024"></label></div>
+   <label class="check"><input id="cleanupRecursive" type="checkbox" checked>包含子目录中的匹配文件</label>
+   <p class="notice danger-note">永久删除，不能撤销。只允许本用户文件区的子目录或插件 var 目录，不允许文件区根目录、系统目录和 Docker 数据目录。只处理本人拥有的普通文件，跳过目录、链接和跨设备内容。保存后必须预览，再确认启用。</p>
+  </div>
+  <label>计划类型<select id="scheduleType"><option value="daily">每天</option><option value="weekly">每周 · 可多选</option><option value="workdays">工作日（周一至周五）</option><option value="weekends">周末（周六、周日）</option><option value="monthly">每月</option><option value="once">指定日期 · 仅一次</option><option value="interval">每隔若干分钟 · 可限时段</option><option value="cron">高级 Cron</option><option value="boot">开机后</option><option value="after_task">前置任务成功后</option></select></label>
+  <div class="form-grid"><label id="timeField">执行时间<input id="scheduleTime" type="time" value="02:00"></label><label id="monthField" hidden>每月几日<input id="monthDay" type="number" min="1" max="31" value="1"></label><label id="onceField" hidden>NAS 本机日期与时间<input id="onceAt" type="datetime-local"></label><label id="intervalField" hidden>间隔分钟<input id="interval" type="number" min="1" max="10080" value="60"></label><label id="delayField" hidden>开机延迟（秒）<input id="delay" type="number" min="60" max="3600" value="120"></label></div>
+  <fieldset id="weekdayField" hidden><legend>选择星期</legend><div class="weekday-picks"><label><input type="checkbox" value="0">一</label><label><input type="checkbox" value="1">二</label><label><input type="checkbox" value="2">三</label><label><input type="checkbox" value="3">四</label><label><input type="checkbox" value="4">五</label><label><input type="checkbox" value="5">六</label><label><input type="checkbox" value="6">日</label></div></fieldset>
+  <div id="windowFields" hidden><label class="check"><input id="useWindow" type="checkbox">仅在指定时间段内执行</label><div id="windowTimes" class="form-grid" hidden><label>开始时间<input id="windowStart" type="time" value="08:00"></label><label>结束时间<input id="windowEnd" type="time" value="22:00"></label></div></div>
+  <label id="cronField" hidden>Cron 表达式<input id="cronExpression" placeholder="例如：0 3 * * 1-5"><span>5 段：分 时 日 月 周；支持 *、逗号、范围和 / 步长，周日为 0 或 7。日期与星期都有限定时，任一符合即运行。</span></label>
+  <label id="dependencyField" hidden>前置任务<select id="parentTask"><option value="">请选择任务</option></select><span>只响应启用后的新执行结果。前置任务重试中会等待；最终成功才联动，失败则跳过。停用后重新启用不补跑历史结果。</span></label>
+  <p id="scheduleHelp"></p><button id="previewSchedule" type="button" class="secondary">预览未来 5 次执行时间</button><div id="schedulePreview" class="notice" hidden></div>
+  <div class="field-box"><h3>执行前检查</h3><label class="check"><input id="waitPool" type="checkbox" checked>存储池 /nas/pool0 已挂载</label><label class="check"><input id="dockerReady" type="checkbox">Docker 引擎已就绪</label><label>需要可访问的目录（可选，每行一个）<textarea id="conditionPaths" rows="3" placeholder="/nas/pool0/你的用户/data/需要挂载的目录"></textarea></label><p>按当前用户检查目录是否存在且可读取。普通计划/联动不满足条件则跳过；开机任务最多等待 30 分钟。立即执行会绕过时间及前置任务，但仍检查这里的条件。</p></div>
+  <div class="field-box"><h3>失败重试</h3><label class="check"><input id="retryEnabled" type="checkbox">失败或超时后自动重试</label><div id="retryFields" class="form-grid" hidden><label>间隔分钟<input id="retryMinutes" type="number" min="1" max="1440" value="5"></label><label>最多重试次数<input id="retryMax" type="number" min="1" max="3" value="3"></label></div><p id="retryHelp">仅启动容器和用户脚本支持。脚本可能已经部分执行，请确保重复运行不会重复写入、扣费或删除文件。默认 5 分钟，最多 3 次，不含首次。</p></div>
+  <label>单次执行超时（秒）<input id="timeout" type="number" min="10" max="3600" value="300" required></label><p>再次编辑保存会自动停用任务、取消等待中的重试，并使清理确认失效。</p><p id="resourceError" role="status"></p>
+ </div><div class="form-actions"><button type="button" class="secondary" data-close="editor">取消</button><button id="saveTask" type="submit" class="primary">保存为停用</button></div></form>
+</section>
+<section id="cleanupDialog" class="dialog editor" role="dialog" aria-modal="true" aria-labelledby="cleanupTitle" hidden><header class="dialog-head"><h2 id="cleanupTitle">清理预览 · 尚未删除</h2><button class="close-button" data-close="cleanupDialog" aria-label="关闭">×</button></header><div class="form-body"><p id="cleanupSummary"></p><p class="notice danger-note">预览是当前估算。定时启用后，每次都会重新扫描并永久删除当时符合规则的文件，包括之后新达到保留天数的文件。文件数或容量超限时整次停止；不删除空目录。重要文件请先备份。</p><pre id="cleanupSamples"></pre></div><div class="form-actions"><button id="cleanupCancel" class="secondary">取消</button><button id="cleanupContinue" class="danger">已检查，继续确认</button></div></section>
+<section id="confirmDialog" class="dialog confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage" hidden><div id="confirmIcon" class="confirm-icon">!</div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p><div class="confirm-actions"><button id="confirmCancel" class="secondary">取消</button><button id="confirmAccept" class="danger">确认</button></div></section>
+<section id="logDialog" class="dialog editor" role="dialog" aria-modal="true" aria-labelledby="logTitle" hidden><header class="dialog-head"><h2 id="logTitle">执行输出</h2><button class="close-button" data-close="logDialog" aria-label="关闭">×</button></header><pre id="logText"></pre></section>
+<div id="pickerBackdrop" class="backdrop picker-backdrop" hidden></div><section id="picker" class="dialog picker" role="dialog" aria-modal="true" aria-labelledby="pickerTitle" hidden><header class="dialog-head"><h2 id="pickerTitle">选择选项</h2><button class="close-button" data-close="picker" aria-label="关闭">×</button></header><div id="pickerOptions" class="picker-options"></div></section>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="client-bridge.js?v=1.0.0"></script><script src="app.js?v=1.0.0"></script>
+</body></html>

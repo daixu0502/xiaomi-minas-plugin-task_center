@@ -1,0 +1,28 @@
+{
+  "title": "定时任务",
+  "desc": "可视化任务计划与执行记录",
+  "icon": "/taskcenter.icon",
+  "type": "url",
+  "permission": [
+    "admin"
+  ],
+  "dev_type": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "url": [
+    {
+      "dev_type": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "url": "/index.html"
+    }
+  ],
+  "sortid": 25,
+  "widget": []
+}

@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+"""Root-owned scheduler; JSON API is restricted to the invoking NAS account."""
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import selectors
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent / 'common'))
+import task_schedule as schedules
+import privileged_runtime as runtime
+
+BASE = runtime.BASE
+USERS = BASE / 'users'
+SELF = BASE / 'minas-helper'
+DOCKER = '/data/docker/docker'
+KINDS = {'reboot', 'docker_start', 'docker_stop', 'docker_restart', 'docker_image', 'script', 'cleanup'}
+LABELS = {'reboot': '重启 NAS', 'docker_start': '启动容器', 'docker_stop': '停止容器', 'docker_restart': '重启容器', 'docker_image': '从本地镜像创建/启动容器', 'script': '执行脚本'}
+MAX_LOG = 65536
+MAINTENANCE = Path(__file__).resolve().parent / 'task_maintenance.py'
+RETRY_KINDS = {'docker_start', 'script'}
+
+def valid_user(user):
+    if not re.fullmatch(r'u[0-9]+', user or ''):
+        raise ValueError('无效用户')
+    pwd.getpwnam(user)
+    return user
+
+def valid_id(value):
+    if not re.fullmatch(r'[a-f0-9]{32}', str(value)):
+        raise ValueError('无效任务/记录标识')
+    return str(value)
+
+def home(user):
+    return USERS / valid_user(user)
+
+def boot_id():
+    return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+def atomic(path, value):
+    tmp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as out:
+        json.dump(value, out, ensure_ascii=False)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(str(tmp), str(path))
+
+@contextlib.contextmanager
+def database(user):
+    directory = home(user)
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError('调度数据尚未初始化')
+    with open(str(directory / 'lock'), 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads((directory / 'state.json').read_text())
+        yield state
+        atomic(directory / 'state.json', state)
+
+def templates():
+    specs = [
+        ('每周重启 NAS', 'reboot', '周日凌晨 04:30 重启整台 NAS，会中断所有服务。', {'type': 'weekly', 'time': '04:30', 'weekday': 6}),
+        ('每天启动指定容器', 'docker_start', '选择已存在的容器，例如 Syncthing；不会拉取镜像。', {'type': 'daily', 'time': '08:00'}),
+        ('每天停止指定容器', 'docker_stop', '夜间停止不需要常驻运行的容器。', {'type': 'daily', 'time': '23:30'}),
+        ('每周重启指定容器', 'docker_restart', '只重启选中的容器，不重启 Docker 引擎。', {'type': 'weekly', 'time': '04:00', 'weekday': 6}),
+        ('从本地镜像创建容器', 'docker_image', '指定本地镜像和新容器名称。桥接网络，无端口映射、目录挂载或特权；复杂服务请先在 Docker 插件创建，再使用启动容器模板。', {'type': 'daily', 'time': '08:00'}),
+        ('开机等待存储池后启动容器', 'docker_start', '开机延迟 120 秒，确认 /nas/pool0 已挂载再启动容器。挂载未就绪时每分钟重试，最长等待 30 分钟。', {'type': 'boot', 'delay': 120}),
+        ('每天执行自己的脚本', 'script', '填写当前 NAS 用户可读取的脚本路径，以该用户执行，不以 root 执行。', {'type': 'daily', 'time': '02:00'}),
+    ]
+    result = [{'template': str(i), 'name': n, 'kind': k, 'description': d, 'schedule': s, 'params': {}, 'timeout': 300, 'waitPool': True, 'enabled': False} for i, (n, k, d, s) in enumerate(specs)]
+    for mode, label, days in [('logs', '清理过期日志', 30), ('temp', '清理临时文件', 7), ('recycle', '清理指定回收站旧文件', 30)]:
+        result.append({'template': 'cleanup_'+mode, 'name': label, 'kind': 'cleanup', 'description': '必须手动填写目录，先保存、预览范围和预计删除量，再确认启用。永久删除，不清理目录和符号链接。', 'params': {'mode': mode, 'path': '', 'days': days, 'recursive': True, 'maxFiles': 1000, 'maxMiB': 1024}, 'schedule': {'type': 'weekly', 'days': [6], 'time': '03:00'}, 'timeout': 300, 'waitPool': True, 'enabled': False})
+    return result
+
+def initialize(user):
+    valid_user(user)
+    USERS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = home(user)
+    if USERS.is_symlink() or directory.is_symlink():
+        raise ValueError('调度数据目录不能是符号链接')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    (directory / 'logs').mkdir(mode=0o700, exist_ok=True)
+    if not (directory / 'state.json').exists():
+        jobs = []
+        for item in templates():
+            task = dict(item)
+            task.pop('template')
+            task.update(id=uuid.uuid4().hex, revision=1, lastSlot='')
+            jobs.append(task)
+        atomic(directory / 'state.json', {'scheduler': True, 'tasks': jobs, 'runs': [], 'sequence': 0})
+    # Existing installations keep all tasks and their enable flags; new templates
+    # live in the template gallery rather than silently creating extra tasks.
+    with database(user) as state:
+        seq = state.get('sequence', 0)
+        for run in state['runs']:
+            if 'seq' not in run:
+                seq += 1; run['seq'] = seq
+        state['sequence'] = max([seq]+[r.get('seq', 0) for r in state['runs']])
+
+def bounded_int(value, low, high):
+    return schedules.integer(value, low, high)
+
+def validate_task(data):
+    name = str(data.get('name', '')).strip()
+    kind = data.get('kind')
+    if not name or len(name) > 80 or kind not in KINDS:
+        raise ValueError('请输入任务名称并选择有效任务类型')
+    out = schedules.validate(data.get('schedule') or {})
+    params = data.get('params') or {}
+    clean = {}
+    if kind in ('docker_start', 'docker_stop', 'docker_restart'):
+        target = str(params.get('container', '')).strip()
+        if target and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', target):
+            raise ValueError('容器名称格式无效')
+        clean['container'] = target
+    if kind == 'docker_image':
+        image = str(params.get('image', '')).strip()
+        name_arg = str(params.get('name', '')).strip()
+        if image and (len(image) > 256 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:@_-]*', image)):
+            raise ValueError('镜像名称格式无效')
+        if name_arg and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name_arg):
+            raise ValueError('新容器名称格式无效')
+        clean = {'image': image, 'name': name_arg}
+    if kind == 'script':
+        script = str(params.get('path', '')).strip()
+        if script and (not script.startswith('/') or '\n' in script or len(script) > 1024):
+            raise ValueError('脚本必须使用绝对路径')
+        clean['path'] = script
+    if kind == 'cleanup':
+        mode = params.get('mode', 'logs')
+        if mode not in ('logs', 'temp', 'recycle'):
+            raise ValueError('无效清理类型')
+        path = str(params.get('path', '')).strip()
+        if path and (not path.startswith('/') or '\x00' in path or '\n' in path or len(path) > 1024 or '..' in Path(path).parts):
+            raise ValueError('请填写不含 .. 的绝对清理目录')
+        clean = {'mode': mode, 'path': path, 'days': bounded_int(params.get('days', 30), 1, 3650), 'recursive': params.get('recursive', True) is True, 'maxFiles': bounded_int(params.get('maxFiles', 1000), 1, 10000), 'maxMiB': bounded_int(params.get('maxMiB', 1024), 1, 10240)}
+    conditions = data.get('conditions') or {}
+    paths = conditions.get('paths', [])
+    if not isinstance(paths, list) or len(paths) > 8 or any(not isinstance(p, str) or not p.startswith('/') or '\x00' in p or '\n' in p or len(p) > 1024 for p in paths):
+        raise ValueError('最多填写 8 个绝对目录路径，每行一个')
+    retry = data.get('retry') or {}
+    if retry.get('enabled') and kind not in RETRY_KINDS:
+        raise ValueError('仅启动容器和用户脚本支持重试；重启、停止、创建容器及清理不支持自动重试')
+    return {'name': name, 'kind': kind, 'params': clean, 'schedule': out, 'timeout': bounded_int(data.get('timeout', 300), 10, 3600), 'waitPool': bool(data.get('waitPool', True)), 'conditions': {'paths': paths, 'dockerReady': conditions.get('dockerReady') is True}, 'retry': {'enabled': retry.get('enabled') is True, 'minutes': bounded_int(retry.get('minutes', 5), 1, 1440), 'max': bounded_int(retry.get('max', 3), 1, 3)}, 'description': str(data.get('description', ''))[:600]}
+
+def ready(task, approval=True):
+    p = task['params']
+    if task['kind'].startswith('docker_') and task['kind'] != 'docker_image' and not p.get('container'):
+        raise ValueError('请先编辑任务并选择容器')
+    if task['kind'] == 'docker_image' and (not p.get('image') or not p.get('name')):
+        raise ValueError('请先选择本地镜像并填写容器名称')
+    if task['kind'] == 'script' and not p.get('path'):
+        raise ValueError('请先填写脚本绝对路径')
+    if task['kind'] == 'cleanup':
+        if not p.get('path'):
+            raise ValueError('请先填写清理目录')
+        if approval and task.get('cleanupApproval', {}).get('revision') != task['revision']:
+            raise ValueError('清理任务必须先预览范围与删除量，再确认启用或执行')
+
+def slot(task, now, boot, uptime):
+    return schedules.slot(task, now, boot, uptime)
+
+def next_time(task, now):
+    if not task['enabled']:
+        return None
+    if task['schedule']['type'] == 'boot':
+        return '下次开机：延迟 %s 秒，最多等待前置条件 30 分钟' % task['schedule']['delay']
+    if task['schedule']['type'] == 'after_task':
+        return '等待启用后前置任务成功；按分钟检查'
+    times = schedules.upcoming(task, now, 1)
+    return times[0] if times else None
+
+def maintenance(user, request, timeout=15):
+    proc = subprocess.run([sys.executable, '-B', str(MAINTENANCE), user], input=json.dumps(request), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, text=True)
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError:
+        raise ValueError('无法读取维护检查结果')
+    if not result.get('ok'):
+        raise ValueError(result.get('error', '维护检查失败'))
+    return result
+
+def condition_error(user, task, cache=None):
+    if task['waitPool'] and not pool_ready():
+        return '存储池未挂载'
+    condition = task.get('conditions') or {}
+    try:
+        if condition.get('paths'):
+            maintenance(user, {'action': 'conditions', 'paths': condition['paths']})
+        if condition.get('dockerReady'):
+            if cache is None or 'docker' not in cache:
+                result = docker(['info', '--format', '{{.ServerVersion}}'], 5)
+                if cache is not None:
+                    cache['docker'] = result.returncode == 0
+                available = result.returncode == 0
+            else:
+                available = cache['docker']
+            if not available:
+                return 'Docker 引擎未就绪'
+    except Exception as error:
+        return str(error)
+    return None
+
+def validate_dependency(state, task, ident):
+    seen = {ident}
+    current = task
+    while current['schedule']['type'] == 'after_task':
+        target = current['schedule']['taskId']
+        if target in seen:
+            raise ValueError('前置任务不能引用自己或形成循环')
+        seen.add(target)
+        current = find_task(state, target)
+
+def retry_pending(state, ident):
+    return next((r for r in state['runs'] if r['taskId'] == ident and r.get('retryAt')), None)
+
+def cancel_retries(state, ident=None):
+    for r in state['runs']:
+        if r.get('retryAt') and (ident is None or r['taskId'] == ident):
+            r.update(retryAt=None, final=True, message=r['message']+'；重试已取消')
+
+def approve_cleanup(task, req):
+    if task['kind'] != 'cleanup':
+        return
+    preview = task.get('cleanupPreview') or {}
+    if not req.get('previewToken') or preview.get('token') != req['previewToken'] or preview.get('revision') != task['revision'] or time.time()-preview.get('created', 0) > 600:
+        raise ValueError('清理预览已失效，请重新预览并确认')
+    task['cleanupApproval'] = {'revision': task['revision'], 'root': preview['root']}
+    task.pop('cleanupPreview', None)
+
+def pool_ready():
+    return os.path.ismount('/nas/pool0')
+
+def uptime_seconds():
+    return float(Path('/proc/uptime').read_text().split()[0])
+
+def process_start(pid):
+    try:
+        return Path('/proc/%s/stat' % int(pid)).read_text().rsplit(')', 1)[1].split()[19]
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+def reconcile(state):
+    current_boot = boot_id()
+    for run in state['runs']:
+        if run['state'] != 'running':
+            continue
+        pid = run.get('pid')
+        started = process_start(pid) if pid else None
+        alive = started and (not run.get('processStart') or run['processStart'] == started)
+        if run['boot'] != current_boot or (not alive and time.time() - run['started'] > 30):
+            run.update(state='interrupted', ended=time.time(), final=True, retryAt=None, message='设备重启或执行进程中断')
+
+def find_task(state, ident):
+    valid_id(ident)
+    for task in state['tasks']:
+        if task['id'] == ident:
+            return task
+    raise ValueError('任务不存在')
+
+def running(state, ident):
+    return any(r['taskId'] == ident and r['state'] == 'running' for r in state['runs'])
+
+def trim_history(user, state):
+    finished = [r for r in state['runs'] if r['state'] != 'running' and not r.get('retryAt')]
+    remove = {r['id'] for r in finished[:-100]}
+    state['runs'] = [r for r in state['runs'] if r['id'] not in remove]
+    for ident in remove:
+        path = home(user) / 'logs' / (valid_id(ident) + '.log')
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+def reserve(user, state, task, source, skip=None):
+    run = {'id': uuid.uuid4().hex, 'taskId': task['id'], 'name': task['name'], 'kind': task['kind'], 'started': time.time(), 'ended': time.time() if skip else None, 'state': 'skipped' if skip else 'running', 'message': skip or '正在执行', 'exitCode': None, 'boot': boot_id(), 'pid': None, 'source': source}
+    state['sequence'] = state.get('sequence', 0)+1
+    run.update(seq=state['sequence'], final=bool(skip), attempt=0)
+    state['runs'].append(run)
+    trim_history(user, state)
+    return run['id']
+
+def launch(user, ident):
+    try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith('SUDO_')}
+        subprocess.Popen([sys.executable, str(SELF), 'taskcenter', 'worker', user, ident], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except Exception as error:
+        with database(user) as state:
+            for r in state['runs']:
+                if r['id'] == ident:
+                    r.update(state='failed', ended=time.time(), final=True, message=str(error))
+
+def docker(args, timeout=15):
+    return runtime.docker_command(args, timeout=timeout)
+
+def execute(user, task):
+    kind, params = task['kind'], task['params']
+    if kind == 'cleanup':
+        result = maintenance(user, {'action': 'clean', 'params': params, 'approval': task['cleanupApproval']}, task['timeout'])
+        text = '永久删除 %s 个文件，%s 字节；跳过 %s 个变化/不可删除的文件。目录未删除。\n%s' % (result['removed'], result['removedBytes'], result['skipped'], '\n'.join(result['errors']))
+        return (1 if result['skipped'] else 0), text, ('failed' if result['skipped'] else 'success')
+    if kind == 'reboot':
+        # Persist the accepted request before shutdown interrupts the worker.
+        proc = subprocess.run(['/sbin/shutdown', '-r', '+1'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10, text=True)
+        return proc.returncode, proc.stdout + '\n已请求 1 分钟后重启；这不是已完成重启的确认。', 'requested' if proc.returncode == 0 else 'failed'
+    if kind.startswith('docker_'):
+        proc = runtime.task_docker(user, task)
+        return proc.returncode, (proc.stdout + proc.stderr)[:MAX_LOG], 'success' if proc.returncode == 0 else 'failed'
+    account = pwd.getpwnam(user)
+    script = params['path']
+    def demote():
+        os.initgroups(user, account.pw_gid)
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+    env = {'PATH': '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/data/docker', 'HOME': account.pw_dir, 'USER': user, 'LOGNAME': user, 'LANG': 'C.UTF-8'}
+    proc = subprocess.Popen(['/bin/sh', script], cwd=account.pw_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, preexec_fn=demote, start_new_session=True)
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    chunks, length, timed_out = [], 0, False
+    deadline = time.monotonic() + task['timeout']
+    try:
+        while selector.get_map():
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
+            for key, _ in selector.select(.2):
+                chunk = os.read(key.fileobj.fileno(), 4096)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if length < MAX_LOG:
+                    part = chunk[:MAX_LOG-length]
+                    chunks.append(part)
+                    length += len(part)
+        if not timed_out:
+            try:
+                proc.wait(timeout=max(.1, deadline-time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+    finally:
+        # Clean remaining children in this process group (not a process sandbox).
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        selector.close()
+        proc.stdout.close()
+    output = b''.join(chunks).decode('utf-8', errors='replace')
+    if length >= MAX_LOG:
+        output += '\n[输出已截断为 64 KiB]'
+    return (124 if timed_out else proc.returncode), output, 'timeout' if timed_out else ('success' if proc.returncode == 0 else 'failed')
+
+def worker(user, ident):
+    valid_id(ident)
+    with database(user) as state:
+        run = next(r for r in state['runs'] if r['id'] == ident)
+        if run['state'] != 'running' or run.get('pid'):
+            return
+        run['pid'] = os.getpid()
+        run['processStart'] = process_start(os.getpid())
+        task = dict(find_task(state, run['taskId']))
+    try:
+        ready(task)
+        reason = condition_error(user, task)
+        if reason:
+            code, output, status = None, reason+'，已跳过，未执行命令。', 'skipped'
+        else:
+            code, output, status = execute(user, task)
+    except subprocess.TimeoutExpired:
+        code, output, status = 124, '操作超时。操作可能已部分完成，请检查实际状态；清理不会自动重试。', 'timeout'
+    except Exception as error:
+        code, output, status = 1, str(error), 'failed'
+    (home(user) / 'logs' / (ident + '.log')).write_text(output[:MAX_LOG], encoding='utf-8')
+    with database(user) as state:
+        for run in state['runs']:
+            if run['id'] == ident:
+                run.update(state=status, ended=time.time(), exitCode=code, final=True, message={'success': '执行成功', 'requested': '已请求 1 分钟后重启', 'failed': '执行失败', 'timeout': '执行超时', 'skipped': output[:300]}.get(status, status))
+                retry = task.get('retry') or {}
+                # A manual, disabled task can retry, but disabling/cancelling while
+                # running suppresses retries using a monotonic cancellation marker.
+                current = find_task(state, task['id'])
+                if status in ('failed', 'timeout') and task['kind'] in RETRY_KINDS and retry.get('enabled') and run.get('attempt', 0) < retry['max'] and state['scheduler'] and current.get('cancelRetryAt', 0) < run['started']:
+                    run.update(retryAt=time.time()+retry['minutes']*60, final=False)
+                    run['message'] += '；%s 分钟后第 %s/%s 次重试' % (retry['minutes'], run.get('attempt', 0)+1, retry['max'])
+
+def tick_user(user):
+    launch_ids = []
+    with database(user) as state:
+        reconcile(state)
+        state['lastTick'] = time.time()
+        if not state['scheduler']:
+            return
+        now = time.time()
+        uptime = uptime_seconds()
+        cache = {}
+        for task in state['tasks']:
+            pending = retry_pending(state, task['id'])
+            if pending:
+                if pending['retryAt'] <= now and not running(state, task['id']):
+                    pending.update(retryAt=None)
+                    reason = condition_error(user, task, cache)
+                    ident = reserve(user, state, task, 'retry', reason)
+                    run = state['runs'][-1]
+                    run.update(attempt=pending.get('attempt', 0)+1, retryRoot=pending.get('retryRoot', pending['id']))
+                    if not reason:
+                        launch_ids.append(ident)
+                continue
+            if not task['enabled']:
+                continue
+            if task['schedule']['type'] == 'after_task':
+                parent = task['schedule']['taskId']
+                events = [r for r in state['runs'] if r['taskId'] == parent and r.get('seq', 0) > task.get('afterSeq', 0) and r['state'] != 'running' and r.get('final', True)]
+                if not events:
+                    continue
+                event = min(events, key=lambda r: r['seq'])
+                current = 'after:'+str(event['seq'])
+                task['afterSeq'] = event['seq']
+                if event['state'] != 'success':
+                    reserve(user, state, task, 'dependency', '前置任务未成功，联动已跳过：'+event['name'])
+                    task['lastSlot'] = current
+                    continue
+            else:
+                current = slot(task, now, boot_id(), uptime)
+            if not current or current == task.get('lastSlot'):
+                continue
+            reason = condition_error(user, task, cache)
+            if reason and task['schedule']['type'] == 'boot' and uptime < task['schedule']['delay'] + 1800:
+                task['waitingReason'] = reason
+                continue
+            task.pop('waitingReason', None)
+            task['lastSlot'] = current
+            skip = '上次执行未结束，已跳过' if running(state, task['id']) else reason
+            ident = reserve(user, state, task, 'dependency' if task['schedule']['type'] == 'after_task' else 'schedule', skip)
+            if task['schedule']['type'] == 'once':
+                task['enabled'] = False
+            if not skip:
+                launch_ids.append(ident)
+    for ident in launch_ids:
+        launch(user, ident)
+
+def api(user, req):
+    action = req.get('action')
+    if action == 'schedule_preview':
+        schedule = schedules.validate(req.get('schedule') or {})
+        now = time.time()
+        return {'times': schedules.upcoming({'schedule': schedule}, now), 'timezone': time.strftime('%Z %z'), 'serverTime': now}
+    if action == 'templates':
+        return {'templates': templates()}
+    if action == 'resources':
+        containers = docker(['ps', '-a', '--format', '{{json .}}'])
+        images = docker(['images', '--format', '{{json .}}'])
+        if containers.returncode or images.returncode:
+            raise ValueError('Docker 未启动或无法访问')
+        return {'containers': [json.loads(s) for s in containers.stdout.splitlines() if s], 'images': [json.loads(s) for s in images.stdout.splitlines() if s]}
+    launch_id = None
+    with database(user) as state:
+        reconcile(state)
+        if action == 'list':
+            tasks = []
+            for t in state['tasks']:
+                public = {k: v for k, v in t.items() if k not in ('cleanupPreview', 'cleanupApproval')}
+                pending = retry_pending(state, t['id'])
+                tasks.append(dict(public, nextRun=next_time(t, time.time()), running=running(state, t['id']), retryAt=pending['retryAt'] if pending else None, cleanupApproved=t.get('cleanupApproval', {}).get('revision') == t['revision']))
+            return {'tasks': tasks, 'runs': list(reversed(state['runs'])), 'scheduler': state['scheduler'], 'lastTick': state.get('lastTick'), 'serverTime': time.time(), 'timezone': time.strftime('%Z %z'), 'poolReady': pool_ready()}
+        if action == 'log':
+            ident = valid_id(req.get('id'))
+            if not any(r['id'] == ident for r in state['runs']):
+                raise ValueError('记录不存在')
+            logfile = home(user) / 'logs' / (ident + '.log')
+            return {'text': logfile.read_text() if logfile.exists() else '尚无输出（任务可能仍在执行，或因条件不满足跳过）。'}
+        if action == 'save':
+            item = validate_task(req.get('task') or {})
+            ident = (req.get('task') or {}).get('id')
+            validate_dependency(state, item, ident)
+            if ident:
+                task = find_task(state, ident)
+                if running(state, ident):
+                    raise ValueError('任务正在执行，不能编辑')
+                task.update(item)
+                task['revision'] += 1
+                # Editing always disarms a task; enabling must be confirmed separately.
+                task['enabled'] = False
+                cancel_retries(state, ident)
+                task.pop('cleanupPreview', None); task.pop('cleanupApproval', None)
+                task.pop('waitingReason', None)
+            else:
+                if len(state['tasks']) >= 100:
+                    raise ValueError('最多保存 100 个任务')
+                item.update(id=uuid.uuid4().hex, enabled=False, revision=1, lastSlot='')
+                state['tasks'].append(item)
+            return {'message': '已保存为停用状态，请检查后手动启用'}
+        if action == 'scheduler':
+            enabled = req.get('enabled') is True
+            if not enabled and any(r['state'] == 'running' for r in state['runs']):
+                raise ValueError('有任务正在执行，请等待结束后停用/卸载调度器')
+            state['scheduler'] = enabled
+            if not enabled:
+                cancel_retries(state)
+            return {'message': '调度器已启用' if enabled else '调度器已停用'}
+        task = find_task(state, req.get('id'))
+        if action == 'cleanup_preview':
+            if task['kind'] != 'cleanup' or running(state, task['id']):
+                raise ValueError('请选择未在执行中的清理任务')
+            ready(task, approval=False)
+            result = maintenance(user, {'action': 'preview', 'params': task['params']})
+            token = uuid.uuid4().hex
+            task['cleanupPreview'] = {'token': token, 'created': time.time(), 'revision': task['revision'], 'root': result['root']}
+            return dict(result, previewToken=token)
+        if action == 'cancel_retry':
+            cancel_retries(state, task['id'])
+            task['cancelRetryAt'] = time.time()
+            return {'message': '已取消等待中的重试；不终止当前执行'}
+        if action == 'toggle':
+            enabled = req.get('enabled') is True
+            if enabled:
+                if req.get('confirmed') is not True:
+                    raise ValueError('启用任务前必须确认')
+                ready(task, approval=False)
+                approve_cleanup(task, req)
+                validate_dependency(state, task, task['id'])
+                if task['schedule']['type'] == 'once' and not schedules.upcoming(task, time.time(), 1):
+                    raise ValueError('一次性执行时间已过去，请修改日期和时间')
+                # Do not retroactively run a boot task in the current session.
+                if task['schedule']['type'] == 'boot':
+                    task['lastSlot'] = 'boot:' + boot_id()
+                if task['schedule']['type'] == 'after_task':
+                    task['afterSeq'] = state.get('sequence', 0)
+            else:
+                cancel_retries(state, task['id'])
+                task['cancelRetryAt'] = time.time()
+            task['enabled'] = enabled
+            return {'message': '任务已启用' if enabled else '已停用后续调度；不终止已开始的任务'}
+        if action == 'delete':
+            if running(state, task['id']):
+                raise ValueError('任务正在执行，不能删除')
+            if any(t['schedule'].get('taskId') == task['id'] for t in state['tasks']):
+                raise ValueError('有其他任务依赖此任务，请先修改或删除依赖它的任务')
+            cancel_retries(state, task['id'])
+            state['tasks'].remove(task)
+            return {'message': '任务已删除，历史记录保留'}
+        if action == 'run':
+            if req.get('confirmed') is not True:
+                raise ValueError('执行前必须确认')
+            ready(task, approval=False)
+            approve_cleanup(task, req)
+            if not state['scheduler'] or running(state, task['id']) or retry_pending(state, task['id']):
+                raise ValueError('调度器未启用、任务正在执行或等待重试')
+            launch_id = reserve(user, state, task, 'manual')
+        else:
+            raise ValueError('未知操作')
+    launch(user, launch_id)
+    return {'message': '已提交执行，请查看执行记录', 'runId': launch_id}
+
+def main():
+    if os.geteuid() != 0:
+        raise ValueError('权限助手必须通过 sudo 调用')
+    if len(sys.argv) > 1:
+        if os.environ.get('SUDO_USER') not in (None, 'root'):
+            raise ValueError('不允许直接调用内部调度命令')
+        action = sys.argv[1]
+        if action == 'init' and len(sys.argv) == 3:
+            initialize(sys.argv[2])
+        elif action == 'worker' and len(sys.argv) == 4:
+            worker(valid_user(sys.argv[2]), valid_id(sys.argv[3]))
+        elif action == 'tick' and len(sys.argv) == 2:
+            if USERS.exists():
+                for directory in USERS.iterdir():
+                    if re.fullmatch(r'u[0-9]+', directory.name) and 'taskcenter' in runtime.registry().get('users', {}).get(directory.name, []):
+                        try:
+                            tick_user(directory.name)
+                        except Exception as error:
+                            print('%s: %s' % (directory.name, error), file=sys.stderr)
+        else:
+            raise ValueError('无效内部命令')
+        return
+    raw = sys.stdin.buffer.read(65537)
+    if len(raw) > 65536:
+        raise ValueError('请求过大')
+    req = json.loads(raw)
+    caller = os.environ.get('SUDO_USER')
+    user = valid_user(caller if caller and caller != 'root' else req.get('pluginUser'))
+    if req.get('pluginUser') != user:
+        raise ValueError('不能访问其他用户的任务')
+    result = api(user, req)
+    print(json.dumps(dict(result, ok=True), ensure_ascii=False))
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        main()
+    except Exception as error:
+        print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=False))
+        sys.exit(1 if len(sys.argv) > 1 else 0)

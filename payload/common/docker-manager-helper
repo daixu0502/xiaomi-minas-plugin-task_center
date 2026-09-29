@@ -1,0 +1,1096 @@
+#!/usr/bin/python3
+"""Root-owned, fixed-action Docker helper for the Xiaomi Storage plugin."""
+
+import datetime as _dt
+import copy
+import http.client
+import json
+import os
+import posixpath
+import re
+import shlex
+import socket
+import subprocess
+import sys
+import time
+import urllib.parse
+import contextlib
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import privileged_runtime as runtime
+
+
+DOCKER = "/data/docker/docker"
+SYSTEMCTL = "/usr/bin/systemctl"
+BULK_STATUS = "/run/dockermanager-bulk-status.json"
+UPGRADE_STATUS = "/run/dockermanager-upgrade-status.json"
+DOCKER_SOCKET = "/var/run/docker.sock"
+MAX_REQUEST = 131072
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RESTART_POLICIES = {"no", "always", "unless-stopped", "on-failure"}
+
+
+class ApiError(Exception):
+    pass
+
+
+def reply(payload):
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    sys.stdout.write("\n")
+
+
+def docker(args, timeout=300, allow_error=False):
+    try:
+        result = runtime.docker_command(args, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ApiError("Docker 操作超时")
+    if result.returncode and not allow_error:
+        message = (result.stderr or result.stdout or "Docker 操作失败").strip()
+        raise ApiError(message[-6000:])
+    return result
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path, timeout=120):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
+
+
+def docker_api(method, path, payload=None, timeout=120):
+    if not os.path.exists(DOCKER_SOCKET):
+        raise ApiError("Docker Socket 不可用")
+    version = docker(["version", "--format", "{{.Server.APIVersion}}"], timeout=30).stdout.strip()
+    if not re.fullmatch(r"[0-9]+\.[0-9]+", version):
+        raise ApiError("无法获取 Docker API 版本")
+    body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = {"Host": "localhost"}
+    if body is not None:
+        headers.update({"Content-Type": "application/json", "Content-Length": str(len(body))})
+    connection = UnixHTTPConnection(DOCKER_SOCKET, timeout=timeout)
+    try:
+        connection.request(method, "/v%s%s" % (version, path), body=body, headers=headers)
+        response = connection.getresponse()
+        raw = response.read()
+    except (OSError, http.client.HTTPException) as error:
+        raise ApiError("Docker API 请求失败：%s" % error)
+    finally:
+        connection.close()
+    data = None
+    if raw:
+        try:
+            data = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            data = None
+    if response.status >= 400:
+        message = data.get("message") if isinstance(data, dict) else raw.decode("utf-8", errors="replace")
+        raise ApiError((message or "Docker API 操作失败")[-6000:])
+    return data or {}
+
+
+def systemctl(args, timeout=180, allow_error=False):
+    try:
+        result = subprocess.run(
+            [SYSTEMCTL] + list(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C.UTF-8"},
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise ApiError("Docker 服务操作超时")
+    if result.returncode and not allow_error:
+        message = (result.stderr or result.stdout or "Docker 服务操作失败").strip()
+        raise ApiError(message[-6000:])
+    return result
+
+
+def engine_is_running():
+    result = systemctl(["is-active", "docker.service"], timeout=20, allow_error=True)
+    return result.stdout.strip() == "active"
+
+
+def engine_status():
+    result = systemctl(["is-active", "docker.service"], timeout=20, allow_error=True)
+    state = result.stdout.strip() or "unknown"
+    return {
+        "engineRunning": state == "active",
+        "serviceState": state,
+        "socketAvailable": os.path.exists("/run/docker.sock") or os.path.exists("/var/run/docker.sock"),
+    }
+
+
+def wait_for_engine(timeout=60):
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while time.monotonic() < deadline:
+        if engine_is_running():
+            result = docker(["info", "--format", "{{json .ServerVersion}}"], timeout=15, allow_error=True)
+            if result.returncode == 0:
+                return
+            last_error = (result.stderr or result.stdout).strip()
+        time.sleep(1)
+    raise ApiError(last_error or "Docker 服务未在预期时间内就绪")
+
+
+def engine_action(request):
+    operation = required_text(request, "operation", 16)
+    if operation == "start":
+        systemctl(["start", "docker.socket", "docker.service"])
+        wait_for_engine()
+        message = "Docker 已启动"
+    elif operation == "stop":
+        systemctl(["stop", "docker.service", "docker.socket"])
+        message = "Docker 已停止"
+    elif operation == "restart":
+        systemctl(["start", "docker.socket"])
+        systemctl(["restart", "docker.service"])
+        wait_for_engine()
+        message = "Docker 已重启"
+    else:
+        raise ApiError("不支持的 Docker 服务操作")
+    status = engine_status()
+    status["message"] = message
+    return status
+
+
+def json_output(args, timeout=60):
+    text = docker(args, timeout=timeout).stdout.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise ApiError("Docker 返回了无法解析的数据")
+
+
+def required_text(request, field, limit=255):
+    value = request.get(field)
+    if not isinstance(value, str):
+        raise ApiError(f"缺少参数：{field}")
+    value = value.strip()
+    if not value or len(value) > limit or "\0" in value or "\r" in value or "\n" in value:
+        raise ApiError(f"参数无效：{field}")
+    return value
+
+
+def safe_target(request, field="target"):
+    value = required_text(request, field, 255)
+    if value.startswith("-") or not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.:@/+\-]*$", value):
+        raise ApiError("Docker 资源名称或 ID 无效")
+    return value
+
+
+def bounded_list(request, field, maximum):
+    value = request.get(field, [])
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > maximum:
+        raise ApiError(f"参数无效：{field}")
+    return value
+
+
+def inspect_containers(ids):
+    if not ids:
+        return []
+    raw = json_output(["container", "inspect"] + ids, timeout=90) or []
+    containers = []
+    for item in raw:
+        state = item.get("State") or {}
+        config = item.get("Config") or {}
+        host = item.get("HostConfig") or {}
+        network_settings = item.get("NetworkSettings") or {}
+        networks = network_settings.get("Networks") or {}
+        mounts = item.get("Mounts") or []
+        ports = network_settings.get("Ports") or {}
+        containers.append({
+            "id": (item.get("Id") or "")[:12],
+            "fullId": item.get("Id") or "",
+            "name": (item.get("Name") or "").lstrip("/"),
+            "image": config.get("Image") or "",
+            "imageId": item.get("Image") or "",
+            "created": item.get("Created") or "",
+            "state": state.get("Status") or "unknown",
+            "running": bool(state.get("Running")),
+            "paused": bool(state.get("Paused")),
+            "restarting": bool(state.get("Restarting")),
+            "exitCode": state.get("ExitCode"),
+            "startedAt": state.get("StartedAt") or "",
+            "finishedAt": state.get("FinishedAt") or "",
+            "restartPolicy": (host.get("RestartPolicy") or {}).get("Name") or "no",
+            "command": config.get("Cmd") or [],
+            "entrypoint": config.get("Entrypoint") or [],
+            "ports": ports,
+            "mounts": [{
+                "type": m.get("Type") or "",
+                "name": m.get("Name") or "",
+                "source": m.get("Source") or "",
+                "destination": m.get("Destination") or "",
+                "rw": bool(m.get("RW")),
+            } for m in mounts],
+            "networks": [{
+                "name": name,
+                "ip": (value or {}).get("IPAddress") or "",
+                "gateway": (value or {}).get("Gateway") or "",
+                "mac": (value or {}).get("MacAddress") or "",
+            } for name, value in networks.items()],
+        })
+    containers.sort(key=lambda value: value["name"].lower())
+    return containers
+
+
+def container_list(_request):
+    result = docker(["container", "ls", "-aq", "--no-trunc"], timeout=30)
+    ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return {"containers": inspect_containers(ids)}
+
+
+def container_stats(_request):
+    result = docker(["stats", "--no-stream", "--format", "{{json .}}"], timeout=60)
+    rows = []
+    for line in result.stdout.splitlines():
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return {"stats": rows}
+
+
+def container_action(request):
+    target = safe_target(request)
+    operation = required_text(request, "operation", 32)
+    commands = {
+        "start": ["container", "start", target],
+        "stop": ["container", "stop", "-t", "10", target],
+        "restart": ["container", "restart", "-t", "10", target],
+        "pause": ["container", "pause", target],
+        "unpause": ["container", "unpause", target],
+        "kill": ["container", "kill", target],
+    }
+    if operation == "remove":
+        command = ["container", "rm"]
+        if bool(request.get("force")):
+            command.append("--force")
+        if bool(request.get("volumes")):
+            command.append("--volumes")
+        command.append(target)
+    elif operation == "rename":
+        new_name = required_text(request, "newName", 128)
+        if not NAME_RE.fullmatch(new_name):
+            raise ApiError("新容器名称无效")
+        command = ["container", "rename", target, new_name]
+    else:
+        command = commands.get(operation)
+    if not command:
+        raise ApiError("不支持的容器操作")
+    output = docker(command, timeout=120).stdout.strip()
+    return {"message": output or "操作完成"}
+
+
+def write_upgrade_status(payload):
+    payload = dict(payload)
+    payload["updatedAt"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    temporary = "%s.%d" % (UPGRADE_STATUS, os.getpid())
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, UPGRADE_STATUS)
+
+
+def read_upgrade_status():
+    try:
+        with open(UPGRADE_STATUS, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def raw_container_inspect(target):
+    value = json_output(["container", "inspect", target], timeout=90) or []
+    if len(value) != 1:
+        raise ApiError("未找到容器")
+    return value[0]
+
+
+def mount_destination(binding):
+    parts = str(binding).split(":")
+    if len(parts) < 2:
+        return ""
+    option_words = {
+        "ro", "rw", "z", "Z", "private", "rprivate", "shared", "rshared",
+        "slave", "rslave", "delegated", "cached", "consistent", "nocopy",
+    }
+    tail = set(parts[-1].split(","))
+    return parts[-2] if tail and tail.issubset(option_words) else parts[-1]
+
+
+def normalized_container_path(value):
+    value = str(value or "")
+    return posixpath.normpath(value) if value else ""
+
+
+def ensure_existing_mounts(item, host_config):
+    binds = list(host_config.get("Binds") or [])
+    covered = {normalized_container_path(mount_destination(binding)) for binding in binds}
+    covered.update(
+        normalized_container_path(value.get("Target") or value.get("Destination") or "")
+        for value in (host_config.get("Mounts") or [])
+        if isinstance(value, dict)
+    )
+    for mount in item.get("Mounts") or []:
+        kind = mount.get("Type") or ""
+        source = mount.get("Source") or ""
+        target = mount.get("Destination") or ""
+        if kind == "bind":
+            real_source = os.path.realpath(source)
+            if real_source == "/nas":
+                pools = [
+                    os.path.join("/nas", value) for value in os.listdir("/nas")
+                    if value.startswith("pool")
+                ]
+                if not any(os.path.ismount(value) for value in pools):
+                    raise ApiError("NAS 存储池尚未挂载，已取消升级：%s" % source)
+            pool_match = re.match(r"^(/nas/pool[^/]+)(?:/|$)", real_source)
+            if pool_match and not os.path.ismount(pool_match.group(1)):
+                raise ApiError("绑定目录所在存储池尚未挂载，已取消升级：%s" % source)
+            if not os.path.exists(source):
+                raise ApiError("绑定目录不存在，已取消升级：%s" % source)
+        normalized_target = normalized_container_path(target)
+        if not normalized_target or normalized_target in covered or kind not in {"bind", "volume"}:
+            continue
+        bind_source = mount.get("Name") if kind == "volume" else source
+        if not bind_source:
+            raise ApiError("无法保留容器挂载：%s" % target)
+        binds.append("%s:%s:%s" % (bind_source, target, "rw" if mount.get("RW") else "ro"))
+        covered.add(normalized_target)
+    host_config["Binds"] = binds or None
+
+
+def filtered_network_aliases(item, settings):
+    full_id = item.get("Id") or ""
+    auto = {full_id, full_id[:12], (item.get("Name") or "").lstrip("/")}
+    return [value for value in (settings.get("Aliases") or []) if value and value not in auto]
+
+
+def create_payload_from_container(item, image_reference):
+    config = copy.deepcopy(item.get("Config") or {})
+    host_config = copy.deepcopy(item.get("HostConfig") or {})
+    config["Image"] = image_reference
+    ensure_existing_mounts(item, host_config)
+    payload = config
+    payload["HostConfig"] = host_config
+
+    network_mode = str(host_config.get("NetworkMode") or "")
+    endpoints = {}
+    if network_mode not in {"host", "none"} and not network_mode.startswith("container:"):
+        for name, original in ((item.get("NetworkSettings") or {}).get("Networks") or {}).items():
+            original = original or {}
+            endpoint = {}
+            for key in ("IPAMConfig", "Links", "DriverOpts", "GwPriority"):
+                if original.get(key) not in (None, [], {}):
+                    endpoint[key] = copy.deepcopy(original.get(key))
+            aliases = filtered_network_aliases(item, original)
+            if aliases:
+                endpoint["Aliases"] = aliases
+            endpoints[name] = endpoint
+    if endpoints:
+        payload["NetworkingConfig"] = {"EndpointsConfig": endpoints}
+    return payload
+
+
+def reconnect_network(container, network_name, settings, item):
+    base = ["network", "connect"]
+    ipam = settings.get("IPAMConfig") or {}
+    if ipam.get("IPv4Address"):
+        base += ["--ip", ipam["IPv4Address"]]
+    if ipam.get("IPv6Address"):
+        base += ["--ip6", ipam["IPv6Address"]]
+    aliases = filtered_network_aliases(item, settings)
+    with_aliases = list(base)
+    for alias in aliases:
+        with_aliases += ["--alias", alias]
+    result = docker(with_aliases + [network_name, container], timeout=60, allow_error=True)
+    if result.returncode and aliases:
+        result = docker(base + [network_name, container], timeout=60, allow_error=True)
+    if result.returncode:
+        raise ApiError((result.stderr or result.stdout or "恢复容器网络失败").strip())
+
+
+def set_upgrade_progress(task_id, target, name, stage, message, pid=None):
+    value = {
+        "taskId": task_id, "state": "running", "target": target,
+        "name": name, "stage": stage, "message": message,
+    }
+    if pid is not None:
+        value["pid"] = pid
+    else:
+        previous = read_upgrade_status() or {}
+        if previous.get("taskId") == task_id and previous.get("pid"):
+            value["pid"] = previous["pid"]
+    write_upgrade_status(value)
+
+
+def wait_for_recreated_container(container_id, seconds=8):
+    deadline = time.monotonic() + seconds
+    last_state = "unknown"
+    while time.monotonic() < deadline:
+        current = raw_container_inspect(container_id)
+        state = current.get("State") or {}
+        last_state = state.get("Status") or "unknown"
+        if last_state in {"exited", "dead", "removing"}:
+            raise ApiError("新容器启动后立即退出，状态：%s" % last_state)
+        health = (state.get("Health") or {}).get("Status")
+        if health == "unhealthy":
+            raise ApiError("新容器健康检查失败")
+        time.sleep(1)
+    current = raw_container_inspect(container_id)
+    if not (current.get("State") or {}).get("Running"):
+        raise ApiError("新容器未保持运行，状态：%s" % last_state)
+
+
+def upgrade_container(task_id, target):
+    item = raw_container_inspect(target)
+    name = (item.get("Name") or "").lstrip("/")
+    image_reference = (item.get("Config") or {}).get("Image") or ""
+    if not name or not NAME_RE.fullmatch(name):
+        raise ApiError("容器名称无效，无法升级")
+    if not image_reference or image_reference.startswith("sha256:"):
+        raise ApiError("该容器使用本地镜像 ID，无法自动拉取升级")
+
+    host_config = item.get("HostConfig") or {}
+    if host_config.get("AutoRemove"):
+        raise ApiError("启用了自动删除（--rm）的容器不支持原配置升级")
+    ensure_existing_mounts(item, copy.deepcopy(host_config))
+    set_upgrade_progress(task_id, target, name, "pull", "正在拉取 %s…" % image_reference)
+    docker(["image", "pull", image_reference], timeout=1800)
+    image_value = json_output(["image", "inspect", image_reference], timeout=60) or []
+    if not image_value:
+        raise ApiError("拉取完成后未找到镜像")
+    old_image_id = item.get("Image") or ""
+    new_image_id = image_value[0].get("Id") or ""
+    if old_image_id == new_image_id:
+        return {
+            "updated": False, "name": name, "image": image_reference,
+            "message": "%s 的镜像已经是最新版本" % name,
+        }
+
+    # Pulling can take a long time. Re-read state and configuration before downtime.
+    item = raw_container_inspect(target)
+    state = item.get("State") or {}
+    was_running = bool(state.get("Running"))
+    was_paused = bool(state.get("Paused"))
+    stop_timeout = (item.get("Config") or {}).get("StopTimeout") or 20
+    try:
+        stop_timeout = max(1, min(int(stop_timeout), 120))
+    except (TypeError, ValueError):
+        stop_timeout = 20
+    payload = create_payload_from_container(item, image_reference)
+    networks = copy.deepcopy(((item.get("NetworkSettings") or {}).get("Networks") or {}))
+    network_mode = str((item.get("HostConfig") or {}).get("NetworkMode") or "")
+    suffix = ".upgrade-backup-" + task_id[-8:]
+    backup_name = name[:max(1, 128 - len(suffix))] + suffix
+    disconnected = []
+    renamed = False
+    new_id = ""
+
+    try:
+        set_upgrade_progress(task_id, target, name, "stop", "正在停止旧容器并保存配置…")
+        if was_paused:
+            docker(["container", "unpause", target], timeout=60)
+        if was_running or was_paused:
+            docker(["container", "stop", "-t", str(stop_timeout), target], timeout=180)
+        docker(["container", "rename", target, backup_name], timeout=60)
+        renamed = True
+
+        if network_mode not in {"host", "none"} and not network_mode.startswith("container:"):
+            for network_name, settings in networks.items():
+                result = docker(
+                    ["network", "disconnect", "--force", network_name, backup_name],
+                    timeout=60, allow_error=True,
+                )
+                if result.returncode:
+                    detail = (result.stderr or result.stdout or "断开旧容器网络失败").strip()
+                    raise ApiError(detail)
+                disconnected.append((network_name, settings or {}))
+
+        set_upgrade_progress(task_id, target, name, "create", "正在按原配置创建新容器…")
+        query = urllib.parse.urlencode({"name": name})
+        created = docker_api("POST", "/containers/create?" + query, payload, timeout=180)
+        new_id = created.get("Id") or ""
+        if not new_id:
+            raise ApiError("Docker 未返回新容器 ID")
+
+        if was_running or was_paused:
+            set_upgrade_progress(task_id, target, name, "start", "正在启动并验证新容器…")
+            docker(["container", "start", new_id], timeout=180)
+            wait_for_recreated_container(new_id)
+            if was_paused:
+                docker(["container", "pause", new_id], timeout=60)
+
+        docker(["container", "rm", backup_name], timeout=120)
+        return {
+            "updated": True, "name": name, "image": image_reference,
+            "oldImageId": old_image_id, "newImageId": new_image_id,
+            "message": "%s 已升级，并按原配置%s" % (name, "恢复为暂停状态" if was_paused else ("运行" if was_running else "保持停止状态")),
+        }
+    except Exception as error:
+        rollback_errors = []
+        if new_id:
+            result = docker(["container", "rm", "--force", new_id], timeout=120, allow_error=True)
+            if result.returncode and "No such container" not in (result.stderr or ""):
+                rollback_errors.append((result.stderr or result.stdout).strip())
+        if renamed:
+            result = docker(["container", "rename", backup_name, name], timeout=60, allow_error=True)
+            if result.returncode:
+                rollback_errors.append((result.stderr or result.stdout).strip())
+            else:
+                for network_name, settings in disconnected:
+                    try:
+                        reconnect_network(name, network_name, settings, item)
+                    except Exception as network_error:
+                        rollback_errors.append(str(network_error))
+                if was_running or was_paused:
+                    result = docker(["container", "start", name], timeout=180, allow_error=True)
+                    if result.returncode:
+                        rollback_errors.append((result.stderr or result.stdout).strip())
+                    elif was_paused:
+                        result = docker(["container", "pause", name], timeout=60, allow_error=True)
+                        if result.returncode:
+                            rollback_errors.append((result.stderr or result.stdout).strip())
+        detail = str(error)
+        if rollback_errors:
+            detail += "；自动回滚不完整：" + "；".join(value for value in rollback_errors if value)[-3000:]
+        else:
+            detail += "；已自动恢复旧容器"
+        raise ApiError(detail)
+
+
+def run_upgrade_worker(task_id, target):
+    try:
+        result = upgrade_container(task_id, target)
+        result.update({"taskId": task_id, "state": "success", "target": target})
+        write_upgrade_status(result)
+    except Exception as error:
+        previous = read_upgrade_status() or {}
+        write_upgrade_status({
+            "taskId": task_id, "state": "error", "target": target,
+            "name": previous.get("name", ""), "stage": previous.get("stage", ""),
+            "message": "升级失败：%s" % error,
+        })
+
+
+def launch_upgrade_worker(task_id, target, name):
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(write_fd)
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            if devnull > 2:
+                os.close(devnull)
+            os.setsid()
+            os.read(read_fd, 1)
+            os.close(read_fd)
+            run_upgrade_worker(task_id, target)
+        finally:
+            os._exit(0)
+    os.close(read_fd)
+    try:
+        set_upgrade_progress(task_id, target, name, "queued", "正在准备升级…", pid=pid)
+        os.write(write_fd, b"1")
+    finally:
+        os.close(write_fd)
+
+
+def container_upgrade(request):
+    target = safe_target(request)
+    active = read_upgrade_status()
+    if active and active.get("state") == "running" and process_exists(active.get("pid")):
+        if active.get("target") != target:
+            raise ApiError("另一个容器正在升级，请等待完成")
+        return {
+            "accepted": True, "taskId": active.get("taskId"),
+            "message": active.get("message", "容器升级正在进行"),
+        }
+    item = raw_container_inspect(target)
+    name = (item.get("Name") or "").lstrip("/")
+    image_reference = (item.get("Config") or {}).get("Image") or ""
+    if not image_reference or image_reference.startswith("sha256:"):
+        raise ApiError("该容器没有可拉取的镜像标签，无法自动升级")
+    task_id = "%d-%s" % (int(time.time() * 1000), os.urandom(4).hex())
+    launch_upgrade_worker(task_id, target, name)
+    return {
+        "accepted": True, "taskId": task_id,
+        "message": "已开始拉取镜像并升级 %s" % name,
+    }
+
+
+def container_upgrade_status(request):
+    task_id = required_text(request, "taskId", 80)
+    status = read_upgrade_status()
+    if not status or status.get("taskId") != task_id:
+        raise ApiError("未找到容器升级任务")
+    if status.get("state") == "running" and not process_exists(status.get("pid")):
+        status.update({"state": "error", "message": "容器升级进程意外结束"})
+        write_upgrade_status(status)
+    return {key: value for key, value in status.items() if key != "pid"}
+
+
+def write_bulk_status(payload):
+    payload = dict(payload)
+    payload["updatedAt"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    temporary = "%s.%d" % (BULK_STATUS, os.getpid())
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, BULK_STATUS)
+
+
+def read_bulk_status():
+    try:
+        with open(BULK_STATUS, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def process_exists(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def run_bulk_worker(task_id, operation, ids, command, verb):
+    result = None
+    pending = set(ids)
+    state_error = ""
+    try:
+        result = docker(command, timeout=600, allow_error=True)
+        wanted_running = operation in {"start", "restart"}
+        targets = set(ids)
+        deadline = time.monotonic() + 150
+        while True:
+            state_result = docker(["container", "ls", "-q", "--no-trunc"], timeout=30, allow_error=True)
+            if state_result.returncode == 0:
+                running = {line.strip() for line in state_result.stdout.splitlines() if line.strip()}
+                pending = targets - running if wanted_running else targets & running
+                if not pending:
+                    message = "已%s %d 个容器" % (verb, len(ids))
+                    if result.returncode:
+                        message += "（已确认最终状态）"
+                    write_bulk_status({
+                        "taskId": task_id, "state": "success", "operation": operation,
+                        "count": len(ids), "message": message,
+                    })
+                    return
+            else:
+                state_error = (state_result.stderr or state_result.stdout).strip()
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(1)
+
+        command_error = (result.stderr or result.stdout).strip()
+        detail = command_error or state_error
+        message = "仍有 %d 个容器未%s" % (len(pending), verb)
+        if detail:
+            message += "：" + detail[-3000:]
+        write_bulk_status({
+            "taskId": task_id, "state": "error", "operation": operation,
+            "count": len(ids), "message": message,
+        })
+    except Exception as error:
+        write_bulk_status({
+            "taskId": task_id, "state": "error", "operation": operation,
+            "count": len(ids), "message": "批量操作失败：%s" % error,
+        })
+
+
+def launch_bulk_worker(task_id, operation, ids, command, verb):
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(write_fd)
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            if devnull > 2:
+                os.close(devnull)
+            os.setsid()
+            os.read(read_fd, 1)
+            os.close(read_fd)
+            run_bulk_worker(task_id, operation, ids, command, verb)
+        finally:
+            os._exit(0)
+    os.close(read_fd)
+    try:
+        write_bulk_status({
+            "taskId": task_id, "state": "running", "operation": operation,
+            "count": len(ids), "pid": pid, "message": "正在%s全部容器…" % verb,
+        })
+        os.write(write_fd, b"1")
+    finally:
+        os.close(write_fd)
+
+
+def container_bulk_action(request):
+    operation = required_text(request, "operation", 16)
+    active = read_bulk_status()
+    if active and active.get("state") == "running" and process_exists(active.get("pid")):
+        if active.get("operation") != operation:
+            raise ApiError("另一个批量容器操作正在进行，请等待完成")
+        return {
+            "accepted": True, "taskId": active.get("taskId"),
+            "count": active.get("count", 0), "message": active.get("message", "批量操作正在进行"),
+        }
+    if operation == "stop":
+        result = docker(["container", "ls", "-q", "--no-trunc"], timeout=30)
+        ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        command = ["container", "stop", "-t", "20"] + ids
+        verb = "停止"
+    elif operation in {"start", "restart"}:
+        result = docker(["container", "ls", "-aq", "--no-trunc"], timeout=30)
+        ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        command = ["container", operation]
+        if operation == "restart":
+            command += ["-t", "20"]
+        command += ids
+        verb = "启动" if operation == "start" else "重启"
+    else:
+        raise ApiError("不支持的批量容器操作")
+    if not ids:
+        return {"count": 0, "message": "没有可%s的容器" % verb}
+    task_id = "%d-%s" % (int(time.time() * 1000), os.urandom(4).hex())
+    launch_bulk_worker(task_id, operation, ids, command, verb)
+    return {
+        "accepted": True, "taskId": task_id, "count": len(ids),
+        "message": "已开始%s %d 个容器" % (verb, len(ids)),
+    }
+
+
+def container_bulk_status(request):
+    task_id = required_text(request, "taskId", 80)
+    status = read_bulk_status()
+    if not status or status.get("taskId") != task_id:
+        raise ApiError("未找到批量操作任务")
+    if status.get("state") == "running" and not process_exists(status.get("pid")):
+        status.update({"state": "error", "message": "批量操作进程意外结束"})
+        write_bulk_status(status)
+    return {key: value for key, value in status.items() if key != "pid"}
+
+
+def container_logs(request):
+    target = safe_target(request)
+    try:
+        tail = int(request.get("tail", 200))
+    except (TypeError, ValueError):
+        tail = 200
+    tail = max(20, min(tail, 1000))
+    result = docker(["container", "logs", "--timestamps", "--tail", str(tail), target], timeout=60, allow_error=True)
+    logs = result.stdout
+    if result.stderr:
+        logs += result.stderr
+    if result.returncode and not logs.strip():
+        raise ApiError("无法读取容器日志")
+    return {"logs": logs[-262144:], "tail": tail}
+
+
+def container_inspect(request):
+    target = safe_target(request)
+    containers = inspect_containers([target])
+    if not containers:
+        raise ApiError("未找到容器")
+    return {"container": containers[0]}
+
+
+def validate_cli_value(value, field, limit=512):
+    if not isinstance(value, str):
+        raise ApiError(f"参数无效：{field}")
+    value = value.strip()
+    if not value or len(value) > limit or any(char in value for char in ("\0", "\r", "\n")):
+        raise ApiError(f"参数无效：{field}")
+    return value
+
+
+def container_create(request):
+    image = safe_target(request, "image")
+    name = request.get("name", "")
+    if name:
+        name = validate_cli_value(name, "name", 128)
+        if not NAME_RE.fullmatch(name):
+            raise ApiError("容器名称无效")
+    restart = request.get("restartPolicy", "unless-stopped")
+    if restart not in RESTART_POLICIES:
+        raise ApiError("重启策略无效")
+    network = request.get("network", "bridge")
+    network = validate_cli_value(network, "network", 128)
+    if not NAME_RE.fullmatch(network):
+        raise ApiError("网络名称无效")
+
+    args = ["container", "create"]
+    if name:
+        args += ["--name", name]
+    args += ["--restart", restart, "--network", network]
+    if bool(request.get("readOnly")):
+        args.append("--read-only")
+
+    for value in bounded_list(request, "ports", 32):
+        value = validate_cli_value(value, "ports", 128)
+        if any(char.isspace() for char in value) or value.startswith("-"):
+            raise ApiError("端口映射格式无效")
+        args += ["--publish", value]
+    for value in bounded_list(request, "volumes", 32):
+        value = validate_cli_value(value, "volumes", 1024)
+        if value.startswith("-"):
+            raise ApiError("挂载格式无效")
+        args += ["--volume", value]
+    for value in bounded_list(request, "env", 64):
+        value = validate_cli_value(value, "env", 4096)
+        key = value.split("=", 1)[0]
+        if not ENV_KEY_RE.fullmatch(key):
+            raise ApiError(f"环境变量名称无效：{key}")
+        args += ["--env", value]
+
+    if bool(request.get("pull")):
+        check = docker(["image", "inspect", image], timeout=30, allow_error=True)
+        if check.returncode:
+            docker(["image", "pull", image], timeout=1800)
+
+    args.append(image)
+    command = request.get("command", "")
+    if isinstance(command, str) and command.strip():
+        try:
+            args += shlex.split(command)
+        except ValueError:
+            raise ApiError("启动命令的引号不完整")
+    elif isinstance(command, list):
+        args += [validate_cli_value(value, "command", 1024) for value in command]
+    elif command not in (None, ""):
+        raise ApiError("启动命令格式无效")
+
+    container_id = docker(args, timeout=300).stdout.strip()
+    if bool(request.get("start", True)):
+        docker(["container", "start", container_id], timeout=120)
+    return {"id": container_id[:12], "message": "容器已创建并启动" if request.get("start", True) else "容器已创建"}
+
+
+def image_list(_request):
+    result = docker(["image", "ls", "-aq", "--no-trunc"], timeout=30)
+    ids = list(dict.fromkeys(line.strip() for line in result.stdout.splitlines() if line.strip()))
+    raw = json_output(["image", "inspect"] + ids, timeout=120) if ids else []
+    images = []
+    for item in raw or []:
+        images.append({
+            "id": (item.get("Id") or "").replace("sha256:", "")[:12],
+            "fullId": item.get("Id") or "",
+            "tags": item.get("RepoTags") or [],
+            "digests": item.get("RepoDigests") or [],
+            "created": item.get("Created") or "",
+            "size": item.get("Size") or 0,
+            "virtualSize": item.get("VirtualSize") or item.get("Size") or 0,
+            "architecture": item.get("Architecture") or "",
+            "os": item.get("Os") or "",
+        })
+    images.sort(key=lambda value: (value["tags"] or [value["id"]])[0].lower())
+    return {"images": images}
+
+
+def image_pull(request):
+    image = safe_target(request, "image")
+    result = docker(["image", "pull", image], timeout=1800)
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    return {"message": lines[-1] if lines else "镜像拉取完成", "output": "\n".join(lines[-40:])}
+
+
+def image_remove(request):
+    target = safe_target(request)
+    args = ["image", "rm"]
+    if bool(request.get("force")):
+        args.append("--force")
+    args.append(target)
+    result = docker(args, timeout=300)
+    return {"message": result.stdout.strip() or "镜像已删除"}
+
+
+def volume_list(_request):
+    result = docker(["volume", "ls", "-q"], timeout=30)
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    raw = json_output(["volume", "inspect"] + names, timeout=90) if names else []
+    volumes = []
+    for item in raw or []:
+        volumes.append({
+            "name": item.get("Name") or "",
+            "driver": item.get("Driver") or "",
+            "mountpoint": item.get("Mountpoint") or "",
+            "created": item.get("CreatedAt") or "",
+            "scope": item.get("Scope") or "",
+            "labels": item.get("Labels") or {},
+            "options": item.get("Options") or {},
+        })
+    volumes.sort(key=lambda value: value["name"].lower())
+    return {"volumes": volumes}
+
+
+def volume_create(request):
+    name = required_text(request, "name", 128)
+    if not NAME_RE.fullmatch(name):
+        raise ApiError("Volume 名称无效")
+    result = docker(["volume", "create", "--driver", "local", name], timeout=60)
+    return {"name": result.stdout.strip(), "message": "Volume 已创建"}
+
+
+def volume_remove(request):
+    name = safe_target(request, "target")
+    args = ["volume", "rm"]
+    if bool(request.get("force")):
+        args.append("--force")
+    args.append(name)
+    docker(args, timeout=120)
+    return {"message": "Volume 已删除"}
+
+
+def network_list(_request):
+    result = docker(["network", "ls", "-q"], timeout=30)
+    ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    raw = json_output(["network", "inspect"] + ids, timeout=90) if ids else []
+    networks = []
+    for item in raw or []:
+        ipam = item.get("IPAM") or {}
+        networks.append({
+            "id": (item.get("Id") or "")[:12],
+            "name": item.get("Name") or "",
+            "driver": item.get("Driver") or "",
+            "scope": item.get("Scope") or "",
+            "internal": bool(item.get("Internal")),
+            "attachable": bool(item.get("Attachable")),
+            "subnets": [entry.get("Subnet") or "" for entry in (ipam.get("Config") or []) if entry.get("Subnet")],
+        })
+    networks.sort(key=lambda value: value["name"].lower())
+    return {"networks": networks}
+
+
+def system_summary(_request):
+    status = engine_status()
+    if not status["engineRunning"]:
+        return {
+            **status,
+            "serverVersion": "", "operatingSystem": "", "architecture": "", "cpus": 0,
+            "memory": 0, "containers": 0, "running": 0, "paused": 0, "stopped": 0,
+            "images": 0, "dockerRootDir": "", "name": "", "disk": [],
+            "checkedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+    info = json_output(["info", "--format", "{{json .}}"], timeout=60) or {}
+    version = json_output(["version", "--format", "{{json .}}"], timeout=60) or {}
+    df_result = docker(["system", "df", "--format", "{{json .}}"], timeout=60, allow_error=True)
+    disk = []
+    if not df_result.returncode:
+        for line in df_result.stdout.splitlines():
+            try:
+                disk.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return {
+        **status,
+        "serverVersion": info.get("ServerVersion") or ((version.get("Server") or {}).get("Version")) or "",
+        "operatingSystem": info.get("OperatingSystem") or "",
+        "architecture": info.get("Architecture") or "",
+        "cpus": info.get("NCPU") or 0,
+        "memory": info.get("MemTotal") or 0,
+        "containers": info.get("Containers") or 0,
+        "running": info.get("ContainersRunning") or 0,
+        "paused": info.get("ContainersPaused") or 0,
+        "stopped": info.get("ContainersStopped") or 0,
+        "images": info.get("Images") or 0,
+        "dockerRootDir": info.get("DockerRootDir") or "",
+        "name": info.get("Name") or "",
+        "disk": disk,
+        "checkedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
+
+ACTIONS = {
+    "engine_action": engine_action,
+    "system_summary": system_summary,
+    "container_list": container_list,
+    "container_stats": container_stats,
+    "container_action": container_action,
+    "container_upgrade": container_upgrade,
+    "container_upgrade_status": container_upgrade_status,
+    "container_bulk_action": container_bulk_action,
+    "container_bulk_status": container_bulk_status,
+    "container_logs": container_logs,
+    "container_inspect": container_inspect,
+    "container_create": container_create,
+    "image_list": image_list,
+    "image_pull": image_pull,
+    "image_remove": image_remove,
+    "volume_list": volume_list,
+    "volume_create": volume_create,
+    "volume_remove": volume_remove,
+    "network_list": network_list,
+}
+
+
+MUTATIONS = {'engine_action', 'container_action', 'container_upgrade', 'container_bulk_action',
+             'container_create', 'image_pull', 'image_remove', 'volume_create', 'volume_remove'}
+
+
+def dispatch(request):
+    if not isinstance(request, dict):
+        raise ApiError("请求格式无效")
+    action = request.get('action')
+    handler = ACTIONS.get(action)
+    if not handler:
+        raise ApiError("未知操作")
+    # One lock covers the full operation, including async children. Read/poll
+    # requests do not wait behind long pulls and upgrades.
+    with runtime.docker_transaction() if action in MUTATIONS else contextlib.nullcontext():
+        return handler(request)
+
+
+def main():
+    if os.geteuid() != 0:
+        raise ApiError("权限助手必须以 root 身份运行")
+    if len(sys.argv) != 1:
+        raise ApiError("权限助手不接受命令行参数")
+    raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
+    if len(raw) > MAX_REQUEST:
+        raise ApiError("请求过大")
+    try:
+        request = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ApiError("请求不是有效 JSON")
+    if not isinstance(request, dict):
+        raise ApiError("请求格式无效")
+    payload = dispatch(request)
+    payload["ok"] = True
+    reply(payload)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except ApiError as error:
+        reply({"ok": False, "error": str(error)})
+    except Exception as error:
+        reply({"ok": False, "error": f"内部错误：{error}"})

@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+u=${PLUG_USER:-$(id -un)}
+home=${PLUG_HOME_DIR:-/home/$u/plugin/taskcenter}
+src=${PLUG_SRC_DIR:-$(readlink "$home/src")}
+helper=/data/.minas-privileged/minas-helper
+invoke(){
+ if [ "$(id -u)" = 0 ];then "$helper" taskcenter;else sudo -n "$helper" taskcenter;fi
+}
+case "${1:-}" in
+ enable|start|postinstall|postupgrade|restart)
+  printf '{"action":"scheduler","pluginUser":"%s","enabled":true}' "$u"|invoke|jq -e '.ok==true' >/dev/null
+  "$src/files/register.sh" running true "$u";;
+ disable|stop|preuninstall|preupgrade)
+  printf '{"action":"scheduler","pluginUser":"%s","enabled":false}' "$u"|invoke|jq -e '.ok==true' >/dev/null
+  "$src/files/register.sh" stopped false "$u";;
+ status)
+  printf '{"action":"list","pluginUser":"%s"}' "$u"|invoke|jq -e '.ok==true and .scheduler==true' >/dev/null;;
+ *) exit 0;;
+esac
+
