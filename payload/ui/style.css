@@ -1,5 +1,4 @@
-/* Plugin-scoped CSS: never style the Xiaomi client host document. */
-[data-minas-plugin="taskcenter"]{--bg: #fbf8f3; --surface: #fff; --text: #302519; --muted: #796e60; --line: #e9dfd3; --accent: #9a4b11; --soft: #fff0d6; --red: #bf3646; --shadow: 0 10px 28px rgba(72,47,16,.07);}
+/* Plugin-specific components. Shared chrome/theme live in palette.css. */
 [data-minas-plugin="taskcenter"] .field-box{display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 15px; min-width: 0px;}
 [data-minas-plugin="taskcenter"] .form-body textarea{font-style: inherit; font-variant: inherit; font-weight: inherit; font-stretch: inherit; line-height: inherit; font-family: inherit; font-optical-sizing: inherit; font-size-adjust: inherit; font-kerning: inherit; font-feature-settings: inherit; font-variation-settings: inherit; font-language-override: inherit; width: 100%; min-width: 0px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: var(--text); resize: vertical; font-size: 16px;}
 [data-minas-plugin="taskcenter"] .form-body fieldset{min-width: 0px; margin: 0px; padding: 12px; border: 1px solid var(--line); border-radius: 12px;}
@@ -13,7 +12,6 @@
 [data-minas-plugin="taskcenter"] #cleanupSamples{margin: 0px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px / 1.7 ui-monospace, monospace;}
 [data-minas-plugin="taskcenter"] #schedulePreview{line-height: 1.8;}
 [data-minas-plugin="taskcenter"] .form-body input:disabled{opacity: 0.45;}
-@media (prefers-color-scheme: dark) {[data-minas-plugin="taskcenter"]:not(.desktop-client){--bg: #171510; --surface: #252119; --text: #f6efdf; --muted: #bcb3a3; --line: #463d30; --accent: #f3be70; --soft: #45321b; --red: #f5929d; --shadow: 0 12px 32px rgba(0,0,0,.2);}}
 [data-minas-plugin="taskcenter"] *{box-sizing: border-box; -webkit-tap-highlight-color: transparent;}
 [data-minas-plugin="taskcenter"] [hidden]{display: none !important;}
 [data-minas-plugin="taskcenter"]{background: var(--bg); text-size-adjust: 100%; overflow-x: hidden;}
@@ -23,7 +21,9 @@
 [data-minas-plugin="taskcenter"] button:disabled{cursor: not-allowed; color: rgb(115, 121, 133) !important; background: rgb(232, 235, 239) !important; border-color: rgb(213, 218, 224) !important; box-shadow: none !important;}
 [data-minas-plugin="taskcenter"] button[aria-busy="true"]{display: inline-flex; align-items: center; justify-content: center; gap: 7px;}
 [data-minas-plugin="taskcenter"] button[aria-busy="true"]::before{content: ""; width: 13px; height: 13px; border-width: 2px; border-style: solid; border-color: currentcolor transparent currentcolor currentcolor; border-image: none; border-radius: 50%; animation: 0.8s linear 0s infinite normal none running taskcenter-spin;}
-@keyframes taskcenter-spin{100% { transform: rotate(360deg); }}
+@keyframes taskcenter-spin {
+  100% { transform: rotate(360deg); }
+}
 [data-minas-plugin="taskcenter"] h1, [data-minas-plugin="taskcenter"] h2, [data-minas-plugin="taskcenter"] h3, [data-minas-plugin="taskcenter"] p{margin: 0px;}
 [data-minas-plugin="taskcenter"] h1{font-size: 25px;}
 [data-minas-plugin="taskcenter"] h2{font-size: 22px;}
@@ -34,23 +34,13 @@
 [data-minas-plugin="taskcenter"] button.secondary{color: var(--accent); background: var(--soft);}
 [data-minas-plugin="taskcenter"] button.danger{color: var(--red); background: rgba(191, 54, 70, 0.08); border-color: rgba(191, 54, 70, 0.2);}
 [data-minas-plugin="taskcenter"] .shell{width: min(100%, 850px); margin: auto; padding: max(16px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); min-width: 0px;}
-[data-minas-plugin="taskcenter"] .topbar{display: flex; align-items: center; justify-content: space-between; color: rgb(255, 255, 255); min-height: 70px;}
-[data-minas-plugin="taskcenter"] .eyebrow{font-size: 10px; font-weight: 800; letter-spacing: 0.15em; margin-bottom: 5px; color: rgb(238, 214, 180);}
 [data-minas-plugin="taskcenter"] .eyebrow.accent{color: var(--accent);}
 [data-minas-plugin="taskcenter"] .icon-button{width: 40px; height: 40px; padding: 0px; color: rgb(255, 255, 255); background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.2); font-size: 24px;}
-[data-minas-plugin="taskcenter"] .hero{display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: var(--shadow);}
-[data-minas-plugin="taskcenter"] .hero > div:first-child{min-width: 0px;}
-[data-minas-plugin="taskcenter"] .hero h2{margin: 12px 0px 5px;}
-[data-minas-plugin="taskcenter"] .hero-icon{display: grid; place-items: center; width: 66px; height: 66px; flex: 0 0 66px; border-radius: 20px; color: white; background: linear-gradient(145deg, rgb(251, 191, 36), rgb(217, 104, 20)); font-size: 48px;}
 [data-minas-plugin="taskcenter"] .badge{display: inline-block; border-radius: 20px; padding: 5px 9px; color: var(--accent); background: var(--soft); font-size: 11px; font-weight: 700;}
 [data-minas-plugin="taskcenter"] .badge.enabled{color: rgb(8, 118, 92); background: rgb(220, 245, 233);}
 [data-minas-plugin="taskcenter"] .badge.failed{color: var(--red); background: rgba(191, 54, 70, 0.1);}
-[data-minas-plugin="taskcenter"] .tabs{position: sticky; top: 8px; z-index: 8; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 14px 0px 18px; padding: 5px; border-radius: 16px; background: rgb(103, 60, 34);}
-[data-minas-plugin="taskcenter"] .tab{min-width: 0px; border: 0px; background: transparent; color: rgb(239, 219, 199); padding: 10px 5px;}
-[data-minas-plugin="taskcenter"] .tab.active{color: rgb(108, 52, 14); background: rgb(255, 255, 255);}
 [data-minas-plugin="taskcenter"] .page{display: none; min-width: 0px;}
 [data-minas-plugin="taskcenter"] .page.active{display: block;}
-[data-minas-plugin="taskcenter"] .metrics{display: grid; grid-template-columns: repeat(4, minmax(0px, 1fr)); gap: 10px; margin-bottom: 12px;}
 [data-minas-plugin="taskcenter"] .metrics article, [data-minas-plugin="taskcenter"] .panel, [data-minas-plugin="taskcenter"] .task-card{border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow);}
 [data-minas-plugin="taskcenter"] .metrics article{padding: 14px;}
 [data-minas-plugin="taskcenter"] .metrics span{font-size: 11px; color: var(--muted);}
@@ -73,7 +63,6 @@
 [data-minas-plugin="taskcenter"] .empty{padding: 26px 14px; border: 1px dashed var(--line); border-radius: 15px; text-align: center; color: var(--muted); background: var(--surface);}
 [data-minas-plugin="taskcenter"] .notice{padding: 13px 14px; background: var(--soft); color: var(--accent); border-radius: 14px; line-height: 1.65; font-size: 12px; margin-bottom: 12px;}
 [data-minas-plugin="taskcenter"] .danger-note{color: var(--red); background: rgba(191, 54, 70, 0.08);}
-[data-minas-plugin="taskcenter"] footer{padding: 24px 0px 4px; color: var(--muted); text-align: center; font-size: 11px;}
 [data-minas-plugin="taskcenter"] .backdrop{position: fixed; inset: 0px; z-index: 30; background: rgba(25, 19, 12, 0.5); touch-action: none;}
 [data-minas-plugin="taskcenter"] .dialog{position: fixed; top: 50%; left: 50%; z-index: 31; transform: translate(-50%, -50%); width: min(380px, -28px + 100vw); max-height: calc(100dvh - 28px); overflow: auto; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: rgba(0, 0, 0, 0.25) 0px 24px 64px; overscroll-behavior: contain; animation: 0.15s ease-out 0s 1 normal none running taskcenter-dialog-in;}
 [data-minas-plugin="taskcenter"] .confirm{padding: 23px 20px max(20px,env(safe-area-inset-bottom)); text-align: center;}
@@ -106,37 +95,13 @@
 [data-minas-plugin="taskcenter"] .toast:empty{display: none;}
 [data-minas-plugin="taskcenter"] .toast.error{background: rgb(151, 49, 64);}
 [data-minas-plugin="taskcenter"].dialog-scroll-locked, [data-minas-plugin="taskcenter"].dialog-scroll-locked .minas-plugin-body{overflow: hidden; overscroll-behavior: none;}
-[data-minas-plugin="taskcenter"].dialog-scroll-locked:not(.desktop-client) .minas-plugin-body{position: fixed; top: var(--dialog-scroll-top,0px); left: 0px; right: 0px; width: 100%;}
-@keyframes taskcenter-dialog-in{0% { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(0.985); }
-100% { opacity: 1; transform: translate(-50%, -50%); }}
-@media (prefers-reduced-motion: reduce) {[data-minas-plugin="taskcenter"] .dialog{animation: auto ease 0s 1 normal none running none;}}
-@media (max-width: 600px) {[data-minas-plugin="taskcenter"] .metrics{grid-template-columns: repeat(2, minmax(0px, 1fr));}
+@keyframes taskcenter-dialog-in {
+  0% { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(0.985); }
+  100% { opacity: 1; transform: translate(-50%, -50%); }
+}
+@media (prefers-reduced-motion: reduce){
+[data-minas-plugin="taskcenter"] .dialog{animation: auto ease 0s 1 normal none running none;}
+}
+@media (max-width: 600px){
 [data-minas-plugin="taskcenter"] .form-grid{grid-template-columns: 1fr;}
-[data-minas-plugin="taskcenter"] .hero{padding: 18px;}
-[data-minas-plugin="taskcenter"] .hero-icon{width: 52px; height: 52px; flex-basis: 52px; font-size: 38px;}
-[data-minas-plugin="taskcenter"] .hero h2{font-size: 21px;}}
-[data-minas-plugin="taskcenter"].desktop-client{color-scheme: light;}
-[data-minas-plugin="taskcenter"].desktop-client, [data-minas-plugin="taskcenter"].desktop-client .minas-plugin-body{height: 100%; min-height: 0px; width: 100%; overflow: hidden; background: rgb(255, 255, 255);}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame{position: relative; display: flex; width: 100%; height: 100%; min-width: 0px; min-height: 0px; overflow: hidden; contain: layout paint; isolation: isolate; color: var(--text); background: linear-gradient(rgb(99, 51, 24) 0px, rgb(151, 82, 32) 150px, rgb(255, 255, 255) 340px);}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .shell{position: relative; flex: 1 1 0px; width: 0px; max-width: none; height: 100%; min-width: 0px; min-height: 0px; margin: 0px; padding: 18px 22px 34px; overflow: hidden auto; scrollbar-gutter: stable;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .shell > *{width: min(100%, 1120px); max-width: 1120px; margin-left: auto; margin-right: auto;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .shell > .hero{margin-bottom: 18px;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .tabs{position: relative; top: auto; display: flex; flex-direction: column; flex: 0 0 190px; width: 190px; height: 100%; margin: 0px; padding: 22px 12px; overflow: auto; border-radius: 0px; border-right: 1px solid var(--line); background: rgb(255, 255, 255);}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .tabs::before{content: "定时任务"; margin: 2px 10px 14px; color: var(--accent); font-weight: 800; font-size: 13px;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .tabs .tab{width: 100%; text-align: left; color: var(--text); flex: 0 0 auto;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .tabs .tab.active{color: var(--accent); background: var(--soft);}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame.desktop-compact{flex-direction: column;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame.desktop-compact > .tabs{flex: 0 0 auto; width: 100%; height: auto; max-height: 35%; flex-direction: row; padding: 8px; overflow-x: auto; border-right: 0px; border-bottom: 1px solid var(--line);}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame.desktop-compact > .tabs::before{display: none;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame.desktop-compact > .tabs .tab{width: auto; flex: 1 0 auto; text-align: center;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame.desktop-compact > .shell{width: 100%; height: 0px; padding: 14px 14px 30px;}
-[data-minas-plugin="taskcenter"].desktop-client .desktop-frame > .dialog{max-width: calc(100% - 28px); max-height: calc(100% - 28px);}
-[data-minas-plugin="taskcenter"].desktop-client.dialog-scroll-locked .desktop-frame > .shell{overflow-y: hidden;}
-[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control{display: inline-flex; align-items: center; justify-content: center; gap: 0px; width: 43px; height: 43px; min-height: 43px; flex: 0 0 43px; padding: 0px; border: 1px solid var(--line); border-radius: 14px; color: var(--text); background: var(--surface-solid,var(--surface)); line-height: 1;}
-[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control svg{display: block; width: 22px; height: 22px; fill: none; stroke: currentcolor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;}
-[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control:active{transform: rotate(45deg);}
-[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control:focus-visible{outline: 2px solid var(--accent,var(--teal-dark,#2563c9)); outline-offset: 3px;}
-[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control[aria-busy="true"] svg{display: none;}
-[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control[aria-busy="true"]::before{margin: 0px;}
-@media (prefers-reduced-motion: reduce) {[data-minas-plugin="taskcenter"] .minas-plugin-body button.refresh-control:active{transform: none;}}
-[data-minas-plugin="taskcenter"].desktop-client .minas-plugin-body button.refresh-control{flex-basis: 38px; width: 38px; height: 38px; min-height: 38px;}
+}

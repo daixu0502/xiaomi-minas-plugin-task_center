@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_NAME='taskcenter'
 PLUGIN_LABEL='定时任务'
-PLUGIN_VERSION='1.0.0'
+PLUGIN_VERSION='1.0.1'
 UNINSTALL_NOTE='停用该用户调度并备份任务和日志；不会删除任务引用的脚本、容器或用户文件。'
 
 # Shared frontend; keep this section consistent across the four manage.sh files.
@@ -488,7 +488,7 @@ python3 "$P/common/component_admin.py" install --plugin "$name" --user "$u" --pa
 stage="$srcp/.$name.new.$$";old="$srcp/.$name.old.$$";rm -rf "$stage";mkdir -p "$stage";cp -R "$P/files" "$stage/files";cp -R "$P/ui" "$stage/ui";chmod 0755 "$stage/files/"*.sh "$stage/ui/taskcenter.cgi";chmod 0644 "$stage/ui/index.html" "$stage/ui/app.js" "$stage/ui/client-bridge.js" "$stage/ui/"*.css "$stage/ui/config";[ ! -d "$src" ]||mv "$src" "$old";mv "$stage" "$src";[ ! -d "$old" ]||rm -rf "$old"
 cp "$P/scripts/control" "$scripts/control";chmod 0755 "$scripts/control";rm -f "$home/src" "$home/tmp";ln -s "$src" "$home/src";mkdir -p "$tmp";ln -s "$tmp" "$home/tmp"
 digest="$tmp/d.$$";find "$src" -type f|LC_ALL=C sort|while IFS= read -r f;do sha256sum "$f"|cut -d' ' -f1;done>"$digest";abstract=$(sha256sum "$digest"|cut -d' ' -f1);rm -f "$digest";size=$(du -sk "$src"|awk '{print $1*1024}');now=$(date +%s)
-jq -n --arg v "$version" --arg a "$abstract" --argjson n "$now" --argjson z "$size" '{plugin:"taskcenter",name:"定时任务",id:19094,version:$v,tags:["tool"],timestamp:$n,desc:"任务模板、定时执行与运行记录",developer:"Local",publisher:"Local",changelog:"公共权限组件、增强计划、前置条件与联动、安全清理、失败重试",system:false,size:$z,port:"",type:"standard",forceupgrade:false,ext:{admin:true},hotplug:[],abstract:$a}'>"$home/INFO"
+jq -n --arg v "$version" --arg a "$abstract" --argjson n "$now" --argjson z "$size" '{plugin:"taskcenter",name:"定时任务",id:19094,version:$v,tags:["tool"],timestamp:$n,desc:"任务模板、定时执行与运行记录",developer:"Local",publisher:"Local",changelog:"统一六插件视觉规范、全宽桌面布局、手机深色主题与样式隔离",system:false,size:$z,port:"",type:"standard",forceupgrade:false,ext:{admin:true},hotplug:[],abstract:$a}'>"$home/INFO"
 rm -f "$web";ln -s "$src/ui" "$web";python3 "$P/make_icon.py" "$icon";chmod 0644 "$icon"
 entry="$tmp/e.$$";jq -n --slurpfile f "$src/ui/config" --slurpfile i "$home/INFO" --argjson n "$now" '{resource:{mpk:"",icon:"",preview:null},status:"running",install:true,upgrade:false,enable:true,changetime:$n,icon:"/icon/taskcenter.icon",progress:"100",frontend:$f[0],info:($i[0]|del(.abstract)),online:true}'>"$entry";exec 9>"$lock";flock -x 9;backup="$list.pre-taskcenter.$now";cp -p "$list" "$backup";l="$list.taskcenter.$$";jq --slurpfile e "$entry" '.taskcenter=$e[0]' "$list">"$l";jq empty "$l";chmod --reference="$list" "$l" 2>/dev/null||chmod 0644 "$l";chown --reference="$list" "$l" 2>/dev/null||chown "$u:$u" "$l";mv -f "$l" "$list";flock -u 9;rm -f "$entry"
 # Common component owns protected modules, sudo rules and the shared cron entry.
