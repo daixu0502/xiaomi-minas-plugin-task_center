@@ -41,10 +41,7 @@
 [data-minas-plugin="taskcenter"] .badge.failed{color: var(--red); background: rgba(191, 54, 70, 0.1);}
 [data-minas-plugin="taskcenter"] .page{display: none; min-width: 0px;}
 [data-minas-plugin="taskcenter"] .page.active{display: block;}
-[data-minas-plugin="taskcenter"] .metrics article, [data-minas-plugin="taskcenter"] .panel, [data-minas-plugin="taskcenter"] .task-card{border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow);}
-[data-minas-plugin="taskcenter"] .metrics article{padding: 14px;}
-[data-minas-plugin="taskcenter"] .metrics span{font-size: 11px; color: var(--muted);}
-[data-minas-plugin="taskcenter"] .metrics strong{display: block; margin-top: 8px; font-size: 27px;}
+[data-minas-plugin="taskcenter"] .panel, [data-minas-plugin="taskcenter"] .task-card{border: 1px solid var(--line); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow);}
 [data-minas-plugin="taskcenter"] .panel, [data-minas-plugin="taskcenter"] .task-card{padding: 18px; margin-bottom: 12px; min-width: 0px;}
 [data-minas-plugin="taskcenter"] .panel > p{margin-top: 10px;}
 [data-minas-plugin="taskcenter"] .welcome h2{margin: 6px 0px 10px;}
