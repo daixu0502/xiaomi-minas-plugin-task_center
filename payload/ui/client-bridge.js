@@ -1,5 +1,24 @@
 (function (global) {
   'use strict';
+
+  // micro-app may expose the host's html/body. Never mutate those nodes.
+  var nativeDocument = global.document;
+  var pluginRoot = nativeDocument.querySelector('[data-minas-plugin="taskcenter"]');
+  if (!pluginRoot) throw new Error('Plugin root is missing');
+  var pluginBody = pluginRoot.querySelector('.minas-plugin-body');
+  var document = new Proxy(nativeDocument, { get: function (target, key) {
+    if (key === 'documentElement') return pluginRoot;
+    if (key === 'body' || key === 'head') return pluginBody;
+    if (key === 'getElementById') return function (id) { return pluginRoot.querySelector('#' + global.CSS.escape(id)); };
+    if (key === 'querySelector' || key === 'querySelectorAll' || key === 'addEventListener' || key === 'removeEventListener') return pluginRoot[key].bind(pluginRoot);
+    var value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
+  }});
+  if (pluginRoot.parentElement === nativeDocument.body && !global.__MICRO_APP_ENVIRONMENT__ && !global.microApp) {
+    nativeDocument.body.style.margin = '0';
+    pluginRoot.style.minHeight = '100vh';
+    if (/SmartStorage|Electron/i.test(global.navigator.userAgent || '')) pluginRoot.style.height = '100vh';
+  }
+
   if ((global.navigator && /SmartStorage|Electron/i.test(global.navigator.userAgent || '')) || global.__MICRO_APP_ENVIRONMENT__ || (global.microApp && typeof global.microApp.dispatch === 'function')) {
     document.documentElement.classList.add('desktop-client');
   }
@@ -22,7 +41,7 @@
     Array.prototype.slice.call(parent.children).forEach(function (child) {
       if (child !== frame && child.matches('.modal-backdrop,.modal,.busy,.toast,.mi-picker-backdrop,.mi-picker-sheet,.mi-confirm-backdrop,.mi-confirm-dialog,.sheet,.dialog,.backdrop,.detail-sheet')) frame.appendChild(child);
     });
-    if (/^(BODY|MICRO-APP-BODY)$/i.test(parent.tagName)) {
+    if (parent === pluginBody) {
       parent.style.setProperty('min-height', '0', 'important');
       parent.style.setProperty('height', '100%', 'important');
       parent.style.setProperty('margin', '0', 'important');
@@ -132,6 +151,6 @@
     function send(info) { var uid = pluginUserId(), url = uid ? '/plugin/' + encodeURIComponent(uid) + '/' + encodeURIComponent(settings.plugin) + '/' + relativeUrl : relativeUrl; return global.fetch(url, info ? withAuthorization(originalOptions, info.cgiToken) : originalOptions); }
     return loadDeviceInfo(false).then(send).then(function (response) { if (!isDesktopClient() || (response.status !== 401 && response.status !== 403)) return response; deviceInfo = null; return loadDeviceInfo(true).then(send); });
   }
-  global.XiaomiPluginClient = { request: request };
+  global.XiaomiPluginClient = { request: request, document: document };
 })(window);
 

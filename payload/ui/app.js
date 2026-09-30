@@ -1,5 +1,6 @@
 (function () {
   'use strict';
+var document = window.XiaomiPluginClient.document;
   const $ = id => document.getElementById(id);
   const kinds = {reboot:'重启 NAS',docker_start:'启动容器',docker_stop:'停止容器',docker_restart:'重启容器',docker_image:'镜像容器',script:'用户脚本',cleanup:'安全清理'};
   const states = {running:'执行中',success:'成功',failed:'失败',timeout:'超时',skipped:'已跳过',interrupted:'已中断',requested:'已请求重启'};
