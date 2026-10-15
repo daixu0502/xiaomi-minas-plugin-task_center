@@ -127,3 +127,7 @@ bash manage.sh uninstall --ip 192.168.31.100 --users u123456789 --yes
 ## 开发验证
 
 `python3 tests/test_helper.py` 在 Linux 临时目录运行隔离测试；Docker、重启和后台任务启动均被模拟，文件清理仅对测试新建的临时样本运行，不操作实际服务或用户文件。`node --check payload/ui/app.js` 检查前端语法，`node tests/preview.cjs` 使用 Playwright 与模拟 API 验证桌面/手机布局、计划表单、清理确认流程。此版尚无通知推送、任意 root 命令或秒级任务。
+
+## 获取源码
+
+在 GitHub 仓库页面选择 **Code → Download ZIP**，解压后保留项目目录结构，按本页说明运行 `manage.sh`。也可从 **Tags** 页面选择指定版本源码。
