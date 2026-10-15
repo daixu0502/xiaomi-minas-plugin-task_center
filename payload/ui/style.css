@@ -6,10 +6,10 @@
 [data-minas-plugin="taskcenter"] .form-body .weekday-picks{display: grid; grid-template-columns: repeat(7, minmax(0px, 1fr)); gap: 5px;}
 [data-minas-plugin="taskcenter"] .form-body .weekday-picks label{display: flex; align-items: center; flex-direction: column; padding: 6px 0px; border-radius: 9px; background: var(--bg);}
 [data-minas-plugin="taskcenter"] .form-body .weekday-picks input{width: 18px; min-height: 18px; margin: 0px;}
-[data-minas-plugin="taskcenter"] .form-body label span{font-size: 12px; font-weight: 400; line-height: 1.6; overflow-wrap: anywhere;}
+[data-minas-plugin="taskcenter"] .form-body label span{font-size:13px; font-weight: 400; line-height: 1.6; overflow-wrap: anywhere;}
 [data-minas-plugin="taskcenter"] .form-body .field-box > label + label{margin-top: 0px;}
 [data-minas-plugin="taskcenter"] #cleanupSummary{white-space: pre-wrap;}
-[data-minas-plugin="taskcenter"] #cleanupSamples{margin: 0px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px / 1.7 ui-monospace, monospace;}
+[data-minas-plugin="taskcenter"] #cleanupSamples{margin: 0px; white-space: pre-wrap; overflow-wrap: anywhere; font:15px/1.75 var(--font-code);}
 [data-minas-plugin="taskcenter"] #schedulePreview{line-height: 1.8;}
 [data-minas-plugin="taskcenter"] .form-body input:disabled{opacity: 0.45;}
 [data-minas-plugin="taskcenter"] *{box-sizing: border-box; -webkit-tap-highlight-color: transparent;}
@@ -36,7 +36,7 @@
 [data-minas-plugin="taskcenter"] .shell{width: min(100%, 850px); margin: auto; padding: max(16px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left)); min-width: 0px;}
 [data-minas-plugin="taskcenter"] .eyebrow.accent{color: var(--accent);}
 [data-minas-plugin="taskcenter"] .icon-button{width: 40px; height: 40px; padding: 0px; color: rgb(255, 255, 255); background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.2); font-size: 24px;}
-[data-minas-plugin="taskcenter"] .badge{display: inline-block; border-radius: 20px; padding: 5px 9px; color: var(--accent); background: var(--soft); font-size: 11px; font-weight: 700;}
+[data-minas-plugin="taskcenter"] .badge{display: inline-block; border-radius: 20px; padding: 5px 9px; color: var(--accent); background: var(--soft); font-size:13px; font-weight: 700;}
 [data-minas-plugin="taskcenter"] .badge.enabled{color: rgb(8, 118, 92); background: rgb(220, 245, 233);}
 [data-minas-plugin="taskcenter"] .badge.failed{color: var(--red); background: rgba(191, 54, 70, 0.1);}
 [data-minas-plugin="taskcenter"] .page{display: none; min-width: 0px;}
@@ -56,9 +56,9 @@
 [data-minas-plugin="taskcenter"] .task-head .badge{flex: 0 0 auto;}
 [data-minas-plugin="taskcenter"] .task-card p{margin-top: 9px;}
 [data-minas-plugin="taskcenter"] .task-meta{display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px;}
-[data-minas-plugin="taskcenter"] .chip{font-size: 11px; padding: 5px 8px; border-radius: 8px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); overflow-wrap: anywhere;}
+[data-minas-plugin="taskcenter"] .chip{font-size:13px; padding: 5px 8px; border-radius: 8px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); overflow-wrap: anywhere;}
 [data-minas-plugin="taskcenter"] .empty{padding: 26px 14px; border: 1px dashed var(--line); border-radius: 15px; text-align: center; color: var(--muted); background: var(--surface);}
-[data-minas-plugin="taskcenter"] .notice{padding: 13px 14px; background: var(--soft); color: var(--accent); border-radius: 14px; line-height: 1.65; font-size: 12px; margin-bottom: 12px;}
+[data-minas-plugin="taskcenter"] .notice{padding: 13px 14px; background: var(--soft); color: var(--accent); border-radius: 14px; line-height: 1.65; font-size:13px; margin-bottom: 12px;}
 [data-minas-plugin="taskcenter"] .danger-note{color: var(--red); background: rgba(191, 54, 70, 0.08);}
 [data-minas-plugin="taskcenter"] .backdrop{position: fixed; inset: 0px; z-index: 30; background: rgba(25, 19, 12, 0.5); touch-action: none;}
 [data-minas-plugin="taskcenter"] .dialog{position: fixed; top: 50%; left: 50%; z-index: 31; transform: translate(-50%, -50%); width: min(380px, -28px + 100vw); max-height: calc(100dvh - 28px); overflow: auto; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: rgba(0, 0, 0, 0.25) 0px 24px 64px; overscroll-behavior: contain; animation: 0.15s ease-out 0s 1 normal none running taskcenter-dialog-in;}
@@ -87,7 +87,7 @@
 [data-minas-plugin="taskcenter"] .picker-options{display: grid; padding: 8px 12px; gap: 4px; max-height: 55vh; overflow: auto; overscroll-behavior: contain;}
 [data-minas-plugin="taskcenter"] .picker-options button{min-height: 46px; text-align: left; border: 0px; overflow-wrap: anywhere;}
 [data-minas-plugin="taskcenter"] .picker-options button.selected{color: var(--accent); background: var(--soft);}
-[data-minas-plugin="taskcenter"] #logText{margin: 0px; padding: 18px; white-space: pre-wrap; word-break: break-word; font: 13px / 1.6 ui-monospace, monospace;}
+[data-minas-plugin="taskcenter"] #logText{margin: 0px; padding: 18px; white-space: pre-wrap; word-break: break-word; font:15px/1.75 var(--font-code);}
 [data-minas-plugin="taskcenter"] .toast{position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); z-index: 60; max-width: calc(100% - 32px); padding: 12px 16px; border-radius: 12px; color: white; background: rgb(80, 56, 33); pointer-events: none;}
 [data-minas-plugin="taskcenter"] .toast:empty{display: none;}
 [data-minas-plugin="taskcenter"] .toast.error{background: rgb(151, 49, 64);}

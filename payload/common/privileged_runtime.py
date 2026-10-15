@@ -10,11 +10,15 @@ import stat
 import subprocess
 import time
 
-VERSION = '1.0.5'
+VERSION = '1.0.6'
 API_VERSION = 1
 BASE = Path('/data/.minas-privileged')
 DOCKER = '/data/docker/docker'
 MODULES = {'dockermanager', 'taskcenter', 'sshrecovery'}
+
+
+class DockerBusyError(ValueError):
+    """The transaction was never acquired; no Docker command has run."""
 
 
 def secure_directory(path, create=False, mode=0o755):
@@ -50,7 +54,9 @@ def lock(name, exclusive=False, wait=0):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise ValueError('Docker 正被另一个插件操作，请稍后重试' if name == 'docker.lock' else '权限组件正在使用或更新，请稍后重试')
+                    if name == 'docker.lock':
+                        raise DockerBusyError('Docker 正被另一个插件操作，请稍后重试')
+                    raise ValueError('权限组件正在使用或更新，请稍后重试')
                 time.sleep(.05)
         yield fd
     finally:
@@ -65,8 +71,8 @@ def component_use():
     return lock('component.lock', wait=10)
 
 
-def docker_transaction():
-    return lock('docker.lock', exclusive=True)
+def docker_transaction(wait=0):
+    return lock('docker.lock', exclusive=True, wait=wait)
 
 
 def docker_command(args, timeout=300):
@@ -104,24 +110,41 @@ def authorize(user, plugin):
 
 def task_docker(user, task):
     """Narrow scheduler interface; cannot request arbitrary Docker flags/mounts."""
+    # Scheduled workers may start together. Queue only before executing anything;
+    # never retry a partially completed Docker command. Waiting and inspection
+    # share the task's existing total timeout rather than extending it.
+    timeout = task['timeout']
+    deadline = time.monotonic() + timeout
+    def remaining(limit=None):
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise subprocess.TimeoutExpired('Docker 任务', timeout)
+        return min(seconds, limit) if limit is not None else seconds
+    try:
+        with docker_transaction(wait=timeout):
+            return _task_docker_locked(user, task, remaining)
+    except DockerBusyError as error:
+        raise DockerBusyError('等待 Docker 操作队列超时（%s 秒）；本次未执行 Docker 命令，请检查其他插件是否有长时间操作。' % timeout) from error
+
+
+def _task_docker_locked(user, task, remaining):
     params, kind = task['params'], task['kind']
-    with docker_transaction():
-        if kind == 'docker_image':
-            inspected = docker_command(['image', 'inspect', params['image']], timeout=15)
-            if inspected.returncode:
-                raise ValueError('本地镜像不存在，请先在 Docker 插件拉取镜像')
-            existing = docker_command(['container', 'inspect', params['name']], timeout=15)
-            if existing.returncode == 0:
-                details = json.loads(existing.stdout)[0]
-                labels = details.get('Config', {}).get('Labels') or {}
-                if labels.get('xiaomi.taskcenter.user') != user or labels.get('xiaomi.taskcenter.task') != task['id'] or details['Config']['Image'] != params['image']:
-                    raise ValueError('同名容器不属于此任务/镜像，请换一个名称')
-                args = ['start', params['name']]
-            else:
-                args = ['run', '-d', '--name', params['name'], '--label', 'xiaomi.taskcenter.user=' + user,
-                        '--label', 'xiaomi.taskcenter.task=' + task['id'], '--network', 'bridge', '--restart', 'no', params['image']]
-        elif kind in {'docker_start', 'docker_stop', 'docker_restart'}:
-            args = [kind.replace('docker_', ''), params['container']]
+    if kind == 'docker_image':
+        inspected = docker_command(['image', 'inspect', params['image']], timeout=remaining(15))
+        if inspected.returncode:
+            raise ValueError('本地镜像不存在，请先在 Docker 插件拉取镜像')
+        existing = docker_command(['container', 'inspect', params['name']], timeout=remaining(15))
+        if existing.returncode == 0:
+            details = json.loads(existing.stdout)[0]
+            labels = details.get('Config', {}).get('Labels') or {}
+            if labels.get('xiaomi.taskcenter.user') != user or labels.get('xiaomi.taskcenter.task') != task['id'] or details['Config']['Image'] != params['image']:
+                raise ValueError('同名容器不属于此任务/镜像，请换一个名称')
+            args = ['start', params['name']]
         else:
-            raise ValueError('不支持的任务 Docker 操作')
-        return docker_command(args, timeout=task['timeout'])
+            args = ['run', '-d', '--name', params['name'], '--label', 'xiaomi.taskcenter.user=' + user,
+                    '--label', 'xiaomi.taskcenter.task=' + task['id'], '--network', 'bridge', '--restart', 'no', params['image']]
+    elif kind in {'docker_start', 'docker_stop', 'docker_restart'}:
+        args = [kind.replace('docker_', ''), params['container']]
+    else:
+        raise ValueError('不支持的任务 Docker 操作')
+    return docker_command(args, timeout=remaining())
