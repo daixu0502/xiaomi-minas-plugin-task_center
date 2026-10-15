@@ -166,7 +166,7 @@ var document = window.XiaomiPluginClient.document;
     $('countFailed').classList.toggle('metric-alert',failedCount>0);
     $('taskSummary').textContent=data.tasks.length+' 个任务 · '+data.tasks.filter(t=>t.enabled).length+' 个已启用';
     list('taskList',data.tasks,t=>taskCard(t,false),'暂无任务，可从模板创建。');list('templateList',templates,t=>taskCard(t,true),'正在读取模板…');list('historyList',data.runs,runCard,'还没有执行记录。安装后所有预置任务保持停用。');list('recent',data.runs.slice(0,3),runCard,'尚未执行任务，先配置并手动启用一个模板吧。');
-    $('version').textContent='插件版本 '+(data.pluginVersion||'1.0.1')+(data.helperVersion?' · 公共权限组件 '+data.helperVersion:'');
+    $('version').textContent='插件版本 '+(data.pluginVersion||'1.0.2')+(data.helperVersion?' · 公共权限组件 '+data.helperVersion:'');
   }
   async function refresh() { if(loading)return; loading=true;try{data=await request('list');if(!templates.length)templates=(await request('templates')).templates;render();}finally{loading=false;} }
   document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>switchPage(b.dataset.page));document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>switchPage(b.dataset.go));

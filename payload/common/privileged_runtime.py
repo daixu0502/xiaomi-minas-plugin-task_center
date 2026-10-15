@@ -10,11 +10,11 @@ import stat
 import subprocess
 import time
 
-VERSION = '1.0.0'
+VERSION = '1.0.3'
 API_VERSION = 1
 BASE = Path('/data/.minas-privileged')
 DOCKER = '/data/docker/docker'
-MODULES = {'dockermanager', 'taskcenter'}
+MODULES = {'dockermanager', 'taskcenter', 'sshrecovery'}
 
 
 def secure_directory(path, create=False, mode=0o755):

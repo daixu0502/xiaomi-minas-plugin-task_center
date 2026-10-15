@@ -27,6 +27,7 @@ CRON = Path('/etc/cron.d')
 LEGACY = [Path('/data/plugin/.taskcenter-system'), Path('/data/.taskcenter-system')]
 CORE_FILES = ('minas-helper', 'privileged_runtime.py', 'component_admin.py', 'docker-manager-helper')
 TASK_FILES = ('task-center-helper', 'task_schedule.py', 'task_maintenance.py')
+SSH_FILES = ('ssh-recovery-helper', 'ssh-recovery-boot.sh')
 MIGRATION_MARK = 'MIGRATED_TO_COMMON'
 
 
@@ -139,6 +140,8 @@ def update_cron(data):
         text = 'SHELL=/bin/sh\nPATH=/usr/sbin:/usr/bin:/sbin:/bin:/data/docker\nMAILTO=""\n'
         if 'taskcenter' in plugins:
             text += '* * * * * root %s/minas-helper taskcenter tick >/dev/null 2>&1\n' % BASE
+        if 'sshrecovery' in plugins:
+            text += '* * * * * root %s/minas-helper sshrecovery prune >/dev/null 2>&1\n' % BASE
         if 'dockermanager' in plugins:
             text += '@reboot root %s/minas-helper boot >/dev/null 2>&1\n' % BASE
         atomic(file, text, 0o644)
@@ -169,6 +172,11 @@ def install(payload, plugin, user, plugin_version, backup):
         for name in TASK_FILES:
             atomic(BASE / name, (payload / 'system' / name).read_bytes(), 0o755 if name == 'task-center-helper' else 0o644)
     data['users'].setdefault(user, [])
+    if plugin == 'sshrecovery':
+        for name, original in zip(SSH_FILES, ('ssh-recovery-helper', 'restore-ssh.sh')):
+            atomic(BASE / name, (payload / 'system' / original).read_bytes(), 0o755)
+        for name in ('sshrecovery', 'sshrecovery/keys', 'sshrecovery/host', 'sshrecovery/tmp'):
+            runtime.secure_directory(BASE / name, create=True, mode=0o700)
     if plugin not in data['users'][user]: data['users'][user].append(plugin)
     data.setdefault('modules', {})[plugin] = plugin_version
     atomic(BASE / 'registry.json', data)
@@ -191,6 +199,9 @@ def install(payload, plugin, user, plugin_version, backup):
 
 def remove(plugin, user, backup):
     data = runtime.registry()
+    if plugin == 'sshrecovery':
+        key = BASE / 'sshrecovery/keys' / (user + '.pub')
+        if key.exists(): key.unlink()
     grants = data['users'].get(user, [])
     if plugin == 'taskcenter':
         target = BASE / 'users' / user
@@ -201,6 +212,13 @@ def remove(plugin, user, backup):
             shutil.rmtree(str(target))
     if plugin in grants: grants.remove(plugin)
     if not grants: data['users'].pop(user, None)
+    if plugin == 'sshrecovery' and not any('sshrecovery' in g for g in data['users'].values()):
+        for name in SSH_FILES:
+            (BASE / name).unlink(missing_ok=True)
+        state = BASE / 'sshrecovery'
+        if state.exists():
+            validate_tree(state)
+            shutil.rmtree(str(state))
     atomic(BASE / 'registry.json', data)
     rule = SUDOERS / (plugin + '-' + user)
     if rule.exists(): rule.unlink()
@@ -208,7 +226,7 @@ def remove(plugin, user, backup):
     # Keep shared code while any user/plugin is registered. Empty scaffolding is
     # harmless; remove known code only, never unknown files or backup directories.
     if not data['users']:
-        for name in CORE_FILES + TASK_FILES:
+        for name in CORE_FILES + TASK_FILES + SSH_FILES:
             file = BASE / name
             if file.is_file(): file.unlink()
         for directory in (BASE / 'users',):
@@ -255,6 +273,12 @@ def main():
                 validate_tree(user_state)
                 shutil.rmtree(str(user_state))
             previous_state = saved / 'users' / args.user
+            if args.plugin == 'sshrecovery':
+                ssh_state = BASE / 'sshrecovery'
+                if ssh_state.exists():
+                    validate_tree(ssh_state); shutil.rmtree(str(ssh_state))
+                previous_ssh = saved / 'sshrecovery'
+                if previous_ssh.exists(): shutil.copytree(str(previous_ssh), str(ssh_state))
             if previous_state.exists():
                 (BASE / 'users').mkdir(mode=0o700, exist_ok=True)
                 shutil.copytree(str(previous_state), str(user_state))

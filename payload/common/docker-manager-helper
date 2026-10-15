@@ -894,9 +894,18 @@ def container_create(request):
     return {"id": container_id[:12], "message": "容器已创建并启动" if request.get("start", True) else "容器已创建"}
 
 
-def image_list(_request):
-    result = docker(["image", "ls", "-aq", "--no-trunc"], timeout=30)
-    ids = list(dict.fromkeys(line.strip() for line in result.stdout.splitlines() if line.strip()))
+def image_ids(include_intermediate=False):
+    result = docker(["image", "ls", "-aq" if include_intermediate else "-q", "--no-trunc"], timeout=30)
+    return list(dict.fromkeys(line.strip() for line in result.stdout.splitlines() if line.strip()))
+
+
+def image_list(request):
+    include = request.get("includeIntermediate", False)
+    if not isinstance(include, bool):
+        raise ApiError("显示构建中间镜像参数必须为布尔值")
+    regular_ids = image_ids()
+    ids = image_ids(True) if include else regular_ids
+    regular_set = set(regular_ids)
     raw = json_output(["image", "inspect"] + ids, timeout=120) if ids else []
     images = []
     for item in raw or []:
@@ -910,9 +919,12 @@ def image_list(_request):
             "virtualSize": item.get("VirtualSize") or item.get("Size") or 0,
             "architecture": item.get("Architecture") or "",
             "os": item.get("Os") or "",
+            "intermediate": (item.get("Id") or "") not in regular_set,
         })
     images.sort(key=lambda value: (value["tags"] or [value["id"]])[0].lower())
-    return {"images": images}
+    return {"images": images, "includeIntermediate": include,
+            "regularCount": sum(not item["intermediate"] for item in images),
+            "intermediateCount": sum(item["intermediate"] for item in images)}
 
 
 def image_pull(request):
@@ -1020,7 +1032,7 @@ def system_summary(_request):
         "running": info.get("ContainersRunning") or 0,
         "paused": info.get("ContainersPaused") or 0,
         "stopped": info.get("ContainersStopped") or 0,
-        "images": info.get("Images") or 0,
+        "images": len(image_ids()),
         "dockerRootDir": info.get("DockerRootDir") or "",
         "name": info.get("Name") or "",
         "disk": disk,
