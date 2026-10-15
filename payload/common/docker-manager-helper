@@ -20,12 +20,14 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import privileged_runtime as runtime
+import user_state_io
 
 
 DOCKER = "/data/docker/docker"
 SYSTEMCTL = "/usr/bin/systemctl"
-BULK_STATUS = "/run/dockermanager-bulk-status.json"
-UPGRADE_STATUS = "/run/dockermanager-upgrade-status.json"
+BULK_STATUS = "docker-bulk-status.json"
+UPGRADE_STATUS = "docker-upgrade-status.json"
+STATE_USER = None
 DOCKER_SOCKET = "/var/run/docker.sock"
 MAX_REQUEST = 131072
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -300,20 +302,17 @@ def container_action(request):
 def write_upgrade_status(payload):
     payload = dict(payload)
     payload["updatedAt"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    temporary = "%s.%d" % (UPGRADE_STATUS, os.getpid())
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-        handle.write("\n")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, UPGRADE_STATUS)
+    payload["bootId"] = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    user_state_io.write_state(STATE_USER, 'dockermanager', UPGRADE_STATUS, payload)
 
 
 def read_upgrade_status():
     try:
-        with open(UPGRADE_STATUS, "r", encoding="utf-8") as handle:
-            value = json.load(handle)
+        value = user_state_io.read_state(STATE_USER, 'dockermanager', UPGRADE_STATUS)
+        if isinstance(value, dict) and value.get('state')=='running' and value.get('bootId')!=Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+            value.update(state='error',message='上次容器升级随系统重启中断',pid=None)
         return value if isinstance(value, dict) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
@@ -654,20 +653,17 @@ def container_upgrade_status(request):
 def write_bulk_status(payload):
     payload = dict(payload)
     payload["updatedAt"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    temporary = "%s.%d" % (BULK_STATUS, os.getpid())
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-        handle.write("\n")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, BULK_STATUS)
+    payload["bootId"] = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    user_state_io.write_state(STATE_USER, 'dockermanager', BULK_STATUS, payload)
 
 
 def read_bulk_status():
     try:
-        with open(BULK_STATUS, "r", encoding="utf-8") as handle:
-            value = json.load(handle)
+        value = user_state_io.read_state(STATE_USER, 'dockermanager', BULK_STATUS)
+        if isinstance(value, dict) and value.get('state')=='running' and value.get('bootId')!=Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+            value.update(state='error',message='上次批量操作随系统重启中断',pid=None)
         return value if isinstance(value, dict) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
@@ -1068,8 +1064,14 @@ MUTATIONS = {'engine_action', 'container_action', 'container_upgrade', 'containe
 
 
 def dispatch(request):
+    global STATE_USER
     if not isinstance(request, dict):
         raise ApiError("请求格式无效")
+    caller = os.environ.get('SUDO_USER')
+    user = caller if caller and caller!='root' else request.get('pluginUser')
+    if request.get('pluginUser') not in (None,user):
+        raise ApiError('禁止访问其他用户的插件状态')
+    STATE_USER = runtime.authorize(user, 'dockermanager')
     action = request.get('action')
     handler = ACTIONS.get(action)
     if not handler:

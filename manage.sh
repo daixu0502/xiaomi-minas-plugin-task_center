@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_NAME='taskcenter'
 PLUGIN_LABEL='定时任务'
-PLUGIN_VERSION='1.0.2'
+PLUGIN_VERSION='1.0.3'
 UNINSTALL_NOTE='停用该用户调度并备份任务和日志；不会删除任务引用的脚本、容器或用户文件。'
 
 # Shared frontend; keep this section consistent across the four manage.sh files.
@@ -479,6 +479,8 @@ version=$PLUGIN_VERSION
 nas_require jq sha256sum plugincenter flock python3 sudo visudo systemctl runuser
 [ -x /sbin/shutdown ] || fail "系统缺少 shutdown 命令"
 B=$(CDPATH= cd "$(dirname "$0")"&&pwd);P="$B/payload";root="/home/$u/plugin";home="$root/$name";scripts="$home/scripts";list="/data/plugin/$u.list";[ -f "$list" ]&&jq empty "$list">/dev/null||exit 1
+was_enabled=$(jq -c --arg p "$name" ' .[$p] as $e | if ($e.enable|type)=="boolean" then $e.enable else true end' "$list")
+was_status=$(jq -r --arg p "$name" '.[$p].status // "running"' "$list")
 oldsrc="";[ -L "$home/src" ]&&oldsrc=$(readlink "$home/src" 2>/dev/null||true);case "$oldsrc" in */"$u"/plugin/pluginsrc/"$name")pool=${oldsrc%/pluginsrc/$name};;*)pool="/nas/pool0/$u/plugin";;esac
 srcp="$pool/pluginsrc";tmpp="$pool/plugintmp";src="$srcp/$name";tmp="$tmpp/$name";webroot=$(jq -r '.settings.nginx_plugin//"/data/plugin/www"' /etc/config/plugin);web="$webroot/$u/$name";icon=/data/plugin/www/icon/taskcenter.icon;helperdir=/data/.minas-privileged;helper="$helperdir/minas-helper";sudoers="/etc/sudoers.d/taskcenter-$u";lock="/data/plugin/.$u.plugins.lock"
 mkdir -p "$home" "$scripts" "$srcp" "$tmpp" "$(dirname "$web")" "$(dirname "$icon")" /etc/sudoers.d
@@ -490,7 +492,7 @@ cp "$P/scripts/control" "$scripts/control";chmod 0755 "$scripts/control";rm -f "
 digest="$tmp/d.$$";find "$src" -type f|LC_ALL=C sort|while IFS= read -r f;do sha256sum "$f"|cut -d' ' -f1;done>"$digest";abstract=$(sha256sum "$digest"|cut -d' ' -f1);rm -f "$digest";size=$(du -sk "$src"|awk '{print $1*1024}');now=$(date +%s)
 jq -n --arg v "$version" --arg a "$abstract" --argjson n "$now" --argjson z "$size" '{plugin:"taskcenter",name:"定时任务",id:19094,version:$v,tags:["tool"],timestamp:$n,desc:"任务模板、定时执行与运行记录",developer:"Local",publisher:"Local",changelog:"兼容固件通过文件描述符执行 CGI，修复插件空白页",system:false,size:$z,port:"",type:"standard",forceupgrade:false,ext:{admin:true},hotplug:[],abstract:$a}'>"$home/INFO"
 rm -f "$web";ln -s "$src/ui" "$web";python3 "$P/make_icon.py" "$icon";chmod 0644 "$icon"
-entry="$tmp/e.$$";jq -n --slurpfile f "$src/ui/config" --slurpfile i "$home/INFO" --argjson n "$now" '{resource:{mpk:"",icon:"",preview:null},status:"running",install:true,upgrade:false,enable:true,changetime:$n,icon:"/icon/taskcenter.icon",progress:"100",frontend:$f[0],info:($i[0]|del(.abstract)),online:true}'>"$entry";exec 9>"$lock";flock -x 9;backup="$list.pre-taskcenter.$now";cp -p "$list" "$backup";l="$list.taskcenter.$$";jq --slurpfile e "$entry" '.taskcenter=$e[0]' "$list">"$l";jq empty "$l";chmod --reference="$list" "$l" 2>/dev/null||chmod 0644 "$l";chown --reference="$list" "$l" 2>/dev/null||chown "$u:$u" "$l";mv -f "$l" "$list";flock -u 9;rm -f "$entry"
+entry="$tmp/e.$$";jq -n --slurpfile f "$src/ui/config" --slurpfile i "$home/INFO" --argjson n "$now" --argjson enabled "$was_enabled" --arg status "$was_status" '{resource:{mpk:"",icon:"",preview:null},status:$status,install:true,upgrade:false,enable:$enabled,changetime:$n,icon:"/icon/taskcenter.icon",progress:"100",frontend:$f[0],info:($i[0]|del(.abstract)),online:true}'>"$entry";exec 9>"$lock";flock -x 9;backup="$list.pre-taskcenter.$now";cp -p "$list" "$backup";l="$list.taskcenter.$$";jq --slurpfile e "$entry" '.taskcenter=$e[0]' "$list">"$l";jq empty "$l";chmod --reference="$list" "$l" 2>/dev/null||chmod 0644 "$l";chown --reference="$list" "$l" 2>/dev/null||chown "$u:$u" "$l";mv -f "$l" "$list";flock -u 9;rm -f "$entry"
 # Common component owns protected modules, sudo rules and the shared cron entry.
 chown -R "$u:$u" "$home" "$src" "$tmp";chown -h "$u:$u" "$home/src" "$home/tmp" "$web";chmod 0700 "$home" "$src" "$tmp";chmod 0755 "$src/ui"
 printf '{"action":"list","pluginUser":"%s"}' "$u"|runuser -u "$u" -- sudo -n "$helper" taskcenter|jq -e '.ok==true'>/dev/null||{ echo '错误：定时任务自检失败'>&2;exit 1;}

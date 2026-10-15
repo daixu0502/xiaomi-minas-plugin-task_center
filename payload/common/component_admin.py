@@ -25,7 +25,7 @@ BACKUPS = Path('/data/.minas-privileged-backups')
 SUDOERS = Path('/etc/sudoers.d')
 CRON = Path('/etc/cron.d')
 LEGACY = [Path('/data/plugin/.taskcenter-system'), Path('/data/.taskcenter-system')]
-CORE_FILES = ('minas-helper', 'privileged_runtime.py', 'component_admin.py', 'docker-manager-helper')
+CORE_FILES = ('minas-helper', 'privileged_runtime.py', 'component_admin.py', 'docker-manager-helper', 'user_state_io.py')
 TASK_FILES = ('task-center-helper', 'task_schedule.py', 'task_maintenance.py')
 SSH_FILES = ('ssh-recovery-helper', 'ssh-recovery-boot.sh')
 MIGRATION_MARK = 'MIGRATED_TO_COMMON'
@@ -133,6 +133,28 @@ def install_sudo(user, plugin):
         if temp.exists(): temp.unlink()
 
 
+def migrate_docker_status(data, backup):
+    """Preserve old display state; exclusive component lock excludes workers."""
+    import user_state_io
+    users=[u for u,grants in data['users'].items() if 'dockermanager' in grants]
+    files=[]
+    for old,name in ((Path('/run/dockermanager-upgrade-status.json'),'docker-upgrade-status.json'),
+                     (Path('/run/dockermanager-bulk-status.json'),'docker-bulk-status.json')):
+        if not old.exists():continue
+        st=old.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022:
+            raise ValueError('旧 Docker 状态文件权限异常')
+        raw=old.read_bytes();value=json.loads(raw)
+        if not isinstance(value,dict):raise ValueError('旧 Docker 状态无效')
+        saved=backup/'legacy-docker-status';saved.mkdir(mode=0o700,exist_ok=True)
+        atomic(saved/old.name,raw)
+        for user in users:
+            if user_state_io.read_state(user,'dockermanager',name) is None:
+                user_state_io.write_state(user,'dockermanager',name,value)
+        files.append(old)
+    for old in files:old.unlink()
+
+
 def update_cron(data):
     plugins = {p for grants in data['users'].values() for p in grants}
     file = CRON / 'minas-privileged'
@@ -194,6 +216,7 @@ def install(payload, plugin, user, plugin_version, backup):
     obsolete = CRON / ('dockermanager-' + user)
     if plugin == 'dockermanager' and obsolete.exists(): obsolete.unlink()
     update_cron(data)
+    if plugin=='dockermanager':migrate_docker_status(data,backup)
     return data
 
 

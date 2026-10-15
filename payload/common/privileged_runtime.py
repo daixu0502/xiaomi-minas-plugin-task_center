@@ -10,7 +10,7 @@ import stat
 import subprocess
 import time
 
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 API_VERSION = 1
 BASE = Path('/data/.minas-privileged')
 DOCKER = '/data/docker/docker'
