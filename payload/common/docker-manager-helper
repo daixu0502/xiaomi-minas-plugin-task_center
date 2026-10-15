@@ -997,6 +997,24 @@ def network_list(_request):
     return {"networks": networks}
 
 
+def system_disk(request):
+    # Display-only per-user cache: never used for cleanup or authorization.
+    identity = os.stat(DOCKER_SOCKET).st_ino
+    name = 'docker-space.json'
+    if request.get('force') is not True:
+        try:
+            saved = user_state_io.read_state(STATE_USER, 'dockermanager', name)
+            if (isinstance(saved, dict) and saved.get('socket') == identity and
+                    type(saved.get('time')) in (int,float) and 0 <= time.time()-saved['time'] < 30 and
+                    isinstance(saved.get('disk'), list) and len(saved['disk']) <= 32):
+                return {'disk':saved['disk']}
+        except (OSError, ValueError, subprocess.SubprocessError): pass
+    result = docker(['system', 'df', '--format', '{{json .}}'], timeout=60)
+    disk = [json.loads(line) for line in result.stdout.splitlines() if line]
+    user_state_io.write_state(STATE_USER, 'dockermanager', name, {'time':time.time(), 'socket':identity, 'disk':disk})
+    return {'disk':disk}
+
+
 def system_summary(_request):
     status = engine_status()
     if not status["engineRunning"]:
@@ -1008,15 +1026,7 @@ def system_summary(_request):
             "checkedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         }
     info = json_output(["info", "--format", "{{json .}}"], timeout=60) or {}
-    version = json_output(["version", "--format", "{{json .}}"], timeout=60) or {}
-    df_result = docker(["system", "df", "--format", "{{json .}}"], timeout=60, allow_error=True)
-    disk = []
-    if not df_result.returncode:
-        for line in df_result.stdout.splitlines():
-            try:
-                disk.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    version = {} if info.get('ServerVersion') else json_output(['version', '--format', '{{json .}}'], timeout=60) or {}
     return {
         **status,
         "serverVersion": info.get("ServerVersion") or ((version.get("Server") or {}).get("Version")) or "",
@@ -1031,7 +1041,7 @@ def system_summary(_request):
         "images": len(image_ids()),
         "dockerRootDir": info.get("DockerRootDir") or "",
         "name": info.get("Name") or "",
-        "disk": disk,
+        "disk": [],
         "checkedAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
 
@@ -1039,6 +1049,7 @@ def system_summary(_request):
 ACTIONS = {
     "engine_action": engine_action,
     "system_summary": system_summary,
+    "system_disk": system_disk,
     "container_list": container_list,
     "container_stats": container_stats,
     "container_action": container_action,

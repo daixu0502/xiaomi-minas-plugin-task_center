@@ -172,5 +172,11 @@ var document = window.XiaomiPluginClient.document;
   document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>switchPage(b.dataset.page));document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>switchPage(b.dataset.go));
   $('newTask').onclick=()=>busy($('newTask'),()=>edit());$('refresh').onclick=()=>busy($('refresh'),refresh);$('refreshHistory').onclick=()=>busy($('refreshHistory'),refresh);
   refresh().catch(e=>{ $('health').textContent='连接失败';toast(e.message,true); });
-  setInterval(()=>{if(!document.hidden&&!dialogs().length)refresh().catch(()=>{});},15000);
+  let refreshTimer, disposed=false;
+  function scheduleRefresh(){clearTimeout(refreshTimer);if(disposed||document.hidden)return;refreshTimer=setTimeout(async()=>{if(!dialogs().length)await refresh().catch(()=>{});scheduleRefresh();},15000);}
+  function onVisibility(){if(document.hidden)clearTimeout(refreshTimer);else{refresh().catch(()=>{});scheduleRefresh();}}
+  function dispose(){disposed=true;clearTimeout(refreshTimer);document.removeEventListener('visibilitychange',onVisibility);}
+  document.addEventListener('visibilitychange',onVisibility);
+  window.addEventListener('pagehide',dispose);window.addEventListener('unmount',dispose);
+  scheduleRefresh();
 })();

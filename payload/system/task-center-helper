@@ -66,8 +66,10 @@ def database(user):
     with open(str(directory / 'lock'), 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = json.loads((directory / 'state.json').read_text())
+        before = json.dumps(state, sort_keys=True, separators=(',', ':'))
         yield state
-        atomic(directory / 'state.json', state)
+        if json.dumps(state, sort_keys=True, separators=(',', ':')) != before:
+            atomic(directory / 'state.json', state)
 
 def templates():
     specs = [
