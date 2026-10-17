@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_NAME='taskcenter'
 PLUGIN_LABEL='定时任务'
-PLUGIN_VERSION='1.0.6'
+PLUGIN_VERSION='1.0.7'
 UNINSTALL_NOTE='停用该用户调度并备份任务和日志；不会删除任务引用的脚本、容器或用户文件。'
 
 # Shared frontend; keep this section consistent across the four manage.sh files.

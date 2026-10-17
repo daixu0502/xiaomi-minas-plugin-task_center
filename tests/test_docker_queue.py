@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-SOURCE=Path(__file__).resolve().parents[1]/'payload/common/privileged_runtime.py'
+SOURCE=Path(__file__).resolve().parents[1]/'payload/common/common/privileged_runtime.py'
 spec=importlib.util.spec_from_file_location('queue_runtime',SOURCE)
 runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Sudo entry point shared by Docker Manager and Task Center (API v1)."""
+"""Stable sudo entry point; feature code lives under modules/ (API v1)."""
 import importlib.machinery
 import importlib.util
 import json
@@ -10,12 +10,20 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'common'))
 import privileged_runtime as runtime
 
 
 def load(name, filename):
-    file = runtime.BASE / filename
+    paths = {'docker-manager-helper':'modules/dockermanager/docker-manager-helper', 'task-center-helper':'modules/taskcenter/task-center-helper', 'ssh-recovery-helper':'modules/sshrecovery/ssh-recovery-helper', 'mihomo-api.py':'modules/mihomo/api.py', 'nascenter-api.py':'modules/nascenter/api.py'}
+    file = runtime.BASE / paths[filename]
+    if not file.exists() and filename in ('docker-manager-helper','task-center-helper','ssh-recovery-helper'):
+        file = runtime.BASE / filename # API-v1 module not yet migrated by its own package.
+    runtime.secure_directory(file.parent)
+    metadata = file.lstat()
+    if not __import__('stat').S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise ValueError('权限模块文件不安全')
+    sys.path.insert(0, str(file.parent))
     loader = importlib.machinery.SourceFileLoader(name, str(file))
     spec = importlib.util.spec_from_loader(name, loader)
     module = importlib.util.module_from_spec(spec)
@@ -31,6 +39,8 @@ def dispatch(plugin, request, caller):
         runtime.authorize(user, plugin)
     elif user:
         runtime.authorize(user, plugin)
+    if 'pluginUser' in request and request['pluginUser'] != user:
+        raise ValueError('不能访问其他用户的权限模块')
     if request.get('action') == 'capabilities':
         return {'apiVersion': runtime.API_VERSION, 'helperVersion': runtime.VERSION, 'module': plugin,
                 'sharedDockerLock': True, 'registeredUsers': None}
@@ -41,6 +51,8 @@ def dispatch(plugin, request, caller):
         raise ValueError('不能访问其他用户的任务')
     if plugin == 'sshrecovery':
         return load('minas_ssh', 'ssh-recovery-helper').api(user, request)
+    if plugin in ('mihomo', 'nascenter'):
+        return load('minas_' + plugin, plugin + '-api.py').api(user, request)
     return load('minas_tasks', 'task-center-helper').api(user, request)
 
 
@@ -76,7 +88,7 @@ def main():
             if sys.argv[2] in ('init', 'worker') and len(sys.argv) >= 4:
                 runtime.authorize(sys.argv[3], 'taskcenter')
             module = load('minas_tasks', 'task-center-helper')
-            sys.argv = [str(runtime.BASE / 'task-center-helper')] + sys.argv[2:]
+            sys.argv = [str(runtime.BASE / 'modules/taskcenter/task-center-helper')] + sys.argv[2:]
             module.main()
             return
         raw = sys.stdin.buffer.read(131073)
@@ -86,7 +98,8 @@ def main():
         if not isinstance(request, dict):
             raise ValueError('请求必须是 JSON 对象')
         payload = dispatch(mode, request, caller)
-        payload.update(ok=True, helperVersion=runtime.VERSION)
+        payload.setdefault('ok', True)
+        payload['helperVersion'] = runtime.VERSION
         print(json.dumps(payload, ensure_ascii=False))
 
 

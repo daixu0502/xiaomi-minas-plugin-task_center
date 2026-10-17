@@ -10,11 +10,13 @@ import stat
 import subprocess
 import time
 
-VERSION = '1.0.6'
+VERSION = '1.1.0'
+LAYOUT_VERSION = 2
 API_VERSION = 1
 BASE = Path('/data/.minas-privileged')
 DOCKER = '/data/docker/docker'
-MODULES = {'dockermanager', 'taskcenter', 'sshrecovery'}
+MODULES = {'dockermanager', 'taskcenter', 'sshrecovery', 'mihomo', 'nascenter'}
+DISTRIBUTORS = MODULES | {'quickshare', 'downloadcenter'}
 
 
 class DockerBusyError(ValueError):

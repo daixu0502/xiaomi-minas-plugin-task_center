@@ -18,7 +18,8 @@ import uuid
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.append(str(Path(__file__).resolve().parent.parent / 'common'))
+sys.path.append(str(Path(__file__).resolve().parent.parent / 'common' / 'common'))
+sys.path.append(str(Path(__file__).resolve().parents[2] / 'common'))
 import task_schedule as schedules
 import privileged_runtime as runtime
 
