@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_NAME='taskcenter'
 PLUGIN_LABEL='定时任务'
-PLUGIN_VERSION='1.0.8'
+PLUGIN_VERSION='1.0.9'
 UNINSTALL_NOTE='停用该用户调度并备份任务和日志；不会删除任务引用的脚本、容器或用户文件。'
 
 # Shared frontend; keep this section consistent across the four manage.sh files.
@@ -210,6 +210,7 @@ installer_main() {
     else installer_emit_uninstall > "$WORK_DIR/bundle/remote-uninstall.sh"; fi
     if [[ $ACTION == install ]]; then
         [[ -d $SCRIPT_DIR/payload ]] || installer_error "安装包缺少 payload 目录。"
+        [[ ! -e $SCRIPT_DIR/payload/system ]] || installer_error "检测到旧版重复资源目录 payload/system，请先整理源码。"
         cp -R "$SCRIPT_DIR/payload" "$WORK_DIR/bundle/payload"
         if declare -F installer_prepare_payload >/dev/null; then installer_prepare_payload "$WORK_DIR/bundle"; fi
     fi
@@ -396,21 +397,6 @@ nas_uninstall() {
     if [ -d "/data/.taskcenter-system/users/$NAS_USER" ]; then cp -a "/data/.taskcenter-system/users/$NAS_USER" "$NAS_BACKUP/state"; fi
     nas_remove_entry
     case "$NAS_PLUGIN" in
-        mihomo)
-            nas_port=$(sed -n 's/^MIXED_PORT=\([0-9][0-9]*\)$/\1/p' "$NAS_HOME/etc/ports.env" 2>/dev/null | head -n 1)
-            nas_helper=/data/plugin/.mihomo-system/mihomo-docker-proxy
-            if [ -x "$nas_helper" ] && [ -n "$nas_port" ]; then
-                "$nas_helper" disable "$nas_port" >/dev/null || nas_fail "无法撤销该用户的 Docker 代理。"
-            fi
-            rm -f "/etc/sudoers.d/mihomo-docker-proxy-$NAS_USER" "/etc/cron.d/mihomo-plugin-$NAS_USER"
-            if [ -f /etc/sudoers.d/mihomo-docker-proxy ] && grep -q "^$NAS_USER[[:space:]]" /etc/sudoers.d/mihomo-docker-proxy; then rm -f /etc/sudoers.d/mihomo-docker-proxy; fi
-            if [ -f /etc/cron.d/mihomo-plugin ] && grep -Fq "boot.sh $NAS_USER" /etc/cron.d/mihomo-plugin; then rm -f /etc/cron.d/mihomo-plugin; fi
-            nas_hotplug=$(jq -r '.settings.system_hotplug // empty' /etc/config/plugin)
-            if [ -n "$nas_hotplug" ]; then rm -f "$nas_hotplug/net/$NAS_USER.$NAS_PLUGIN"; fi;;
-        dockermanager)
-            rm -f "/etc/sudoers.d/dockermanager-$NAS_USER" "/etc/cron.d/dockermanager-$NAS_USER";;
-        quickshare)
-            rm -f "/etc/cron.d/quickshare-$NAS_USER";;
         taskcenter)
             rm -f "/etc/sudoers.d/taskcenter-$NAS_USER"
             : # Shared user state is removed and backed up by component_admin.
@@ -422,16 +408,6 @@ nas_uninstall() {
     rm -rf "$NAS_SRC" "$NAS_TMP" "$NAS_HOME"
     if ! nas_other_users; then
         case "$NAS_PLUGIN" in
-            mihomo)
-                if ! ls /etc/sudoers.d/mihomo-docker-proxy* >/dev/null 2>&1; then
-                    rm -f /data/plugin/.mihomo-system/mihomo-docker-proxy
-                    rmdir /data/plugin/.mihomo-system 2>/dev/null || true
-                fi;;
-            dockermanager)
-                if ! ls /etc/sudoers.d/dockermanager-u* >/dev/null 2>&1; then
-                    rm -f /data/plugin/.dockermanager-system/docker-manager-helper
-                    rmdir /data/plugin/.dockermanager-system 2>/dev/null || true
-                fi;;
             taskcenter)
                 if ! ls /etc/sudoers.d/taskcenter-u* >/dev/null 2>&1; then
                     rm -f /data/.taskcenter-system/task-center-helper /data/.taskcenter-system/task_schedule.py /data/.taskcenter-system/task_maintenance.py /etc/cron.d/taskcenter

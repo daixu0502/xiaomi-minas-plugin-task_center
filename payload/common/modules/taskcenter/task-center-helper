@@ -22,6 +22,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent / 'common' / 'common'
 sys.path.append(str(Path(__file__).resolve().parents[2] / 'common'))
 import task_schedule as schedules
 import privileged_runtime as runtime
+from user_state_io import read_state, write_state, delete_state
 
 BASE = runtime.BASE
 USERS = BASE / 'users'
@@ -94,7 +95,6 @@ def initialize(user):
     if USERS.is_symlink() or directory.is_symlink():
         raise ValueError('调度数据目录不能是符号链接')
     directory.mkdir(mode=0o700, exist_ok=True)
-    (directory / 'logs').mkdir(mode=0o700, exist_ok=True)
     if not (directory / 'state.json').exists():
         jobs = []
         for item in templates():
@@ -281,10 +281,9 @@ def trim_history(user, state):
     remove = {r['id'] for r in finished[:-100]}
     state['runs'] = [r for r in state['runs'] if r['id'] not in remove]
     for ident in remove:
-        path = home(user) / 'logs' / (valid_id(ident) + '.log')
         try:
-            path.unlink()
-        except FileNotFoundError:
+            delete_state(user,'taskcenter','log-'+valid_id(ident)+'.json')
+        except (OSError,ValueError,subprocess.SubprocessError):
             pass
 
 def reserve(user, state, task, source, skip=None):
@@ -386,7 +385,8 @@ def worker(user, ident):
         code, output, status = 124, '操作超时。操作可能已部分完成，请检查实际状态；清理不会自动重试。', 'timeout'
     except Exception as error:
         code, output, status = 1, str(error), 'failed'
-    (home(user) / 'logs' / (ident + '.log')).write_text(output[:MAX_LOG], encoding='utf-8')
+    try:write_state(user,'taskcenter','log-'+ident+'.json',{'text':output[:MAX_LOG]})
+    except (OSError,ValueError,subprocess.SubprocessError):pass
     with database(user) as state:
         for run in state['runs']:
             if run['id'] == ident:
@@ -482,8 +482,9 @@ def api(user, req):
             ident = valid_id(req.get('id'))
             if not any(r['id'] == ident for r in state['runs']):
                 raise ValueError('记录不存在')
-            logfile = home(user) / 'logs' / (ident + '.log')
-            return {'text': logfile.read_text() if logfile.exists() else '尚无输出（任务可能仍在执行，或因条件不满足跳过）。'}
+            try:log = read_state(user,'taskcenter','log-'+ident+'.json')
+            except (OSError,ValueError,subprocess.SubprocessError):log=None
+            return {'text': str(log.get('text',''))[:MAX_LOG] if isinstance(log,dict) else '尚无输出（缓存已清理、任务仍在执行或因条件不满足跳过）。'}
         if action == 'save':
             item = validate_task(req.get('task') or {})
             ident = (req.get('task') or {}).get('id')
